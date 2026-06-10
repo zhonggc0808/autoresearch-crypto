@@ -177,6 +177,62 @@ def main():
             )
             print(f"[LLM] 启用 LLM 假设生成: {llm_gen.provider}/{args.llm_model}")
 
+    # Build on_revive callback for data-switching revival actions
+    def _on_revive(action: str, action_params: Dict) -> tuple:
+        """Handle timeframe and symbol switching during revival.
+
+        Returns (new_evaluate_fn, new_df) or (None, None).
+        """
+        nonlocal evaluate_fn, df
+        if action == "switch_timeframe":
+            tfs = action_params.get("timeframes", ["15m", "1h", "4h"])
+            # Pick first available timeframe
+            tf_map = {
+                "15m": "15min", "1h": "1h", "4h": "4h",
+            }
+            for tf in tfs:
+                rule = tf_map.get(tf, "15min")
+                try:
+                    df_resampled = df.set_index("timestamp").resample(rule).agg({
+                        "open": "first", "high": "max", "low": "min",
+                        "close": "last", "volume": "sum",
+                    }).dropna().reset_index()
+                    if len(df_resampled) >= 100:
+                        df = df_resampled
+                        evaluate_fn = make_evaluate_fn(df)
+                        print(f"  [Revive] 数据切换至 {tf}，{len(df)} bars")
+                        return evaluate_fn, df
+                except Exception as e:
+                    print(f"  [Revive] 时间框架切换失败 ({tf}): {e}")
+                    continue
+            return None, None
+
+        elif action == "switch_symbol":
+            symbols = action_params.get("symbols", ["BTCUSDT", "SOLUSDT"])
+            for sym in symbols:
+                data_path = os.path.join(str(DATA_DIR), f"{sym}_5m_60d.parquet")
+                if not os.path.exists(data_path):
+                    print(f"  [Revive] 数据文件不存在: {data_path}")
+                    continue
+                try:
+                    table = pq.read_table(data_path)
+                    new_df = table.to_pandas()
+                    for col in ["open", "high", "low", "close", "volume"]:
+                        if col in new_df.columns:
+                            new_df[col] = new_df[col].astype(float)
+                    new_df = new_df.iloc[-288 * args.days:].reset_index(drop=True)
+                    if len(new_df) >= 100:
+                        df = new_df
+                        evaluate_fn = make_evaluate_fn(df)
+                        print(f"  [Revive] 币种切换至 {sym}，价格 {df['close'].iloc[0]:.1f}，{len(df)} bars")
+                        return evaluate_fn, df
+                except Exception as e:
+                    print(f"  [Revive] 币种切换失败 ({sym}): {e}")
+                    continue
+            return None, None
+
+        return None, None
+
     # Run GEPA evolution
     if args.v2:
         engine = gepa_evolve_v2(
@@ -189,6 +245,7 @@ def main():
             dead_threshold=5,
             verbose=True,
             llm_generator=llm_gen,
+            on_revive=_on_revive,
         )
     else:
         engine = gepa_evolve(

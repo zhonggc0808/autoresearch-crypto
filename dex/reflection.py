@@ -20,7 +20,7 @@ import os
 import random
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -558,6 +558,7 @@ def gepa_evolve_v2(
     dead_threshold: int = 5,
     verbose: bool = True,
     llm_generator: Any = None,  # Optional LLMHypothesisGenerator
+    on_revive: Optional[Callable[[str, Dict[str, Any]], Tuple[Callable, Any]]] = None,
 ) -> ReflectionEngine:
     """GEPA V2: risk-adjusted scoring + edge guards + never-stop revival.
 
@@ -570,6 +571,9 @@ def gepa_evolve_v2(
         max_dd: Maximum acceptable drawdown before RISKY flag.
         dead_threshold: Rounds of no improvement before DEAD flag.
         verbose: Print progress.
+        on_revive: Optional callback when data-switching revival fires.
+            Called as ``on_revive(action, action_params)`` and must return
+            ``(new_evaluate_fn, new_df)`` or ``(None, None)`` if unsupported.
     """
     if verbose:
         print("=" * 60)
@@ -579,6 +583,117 @@ def gepa_evolve_v2(
             f"MaxDD={max_dd * 100:.0f}%  |  DeadThreshold={dead_threshold}"
         )
         print("=" * 60)
+
+    # ------------------------------------------------------------------
+    # Strategy switch map — default params for each strategy type.
+    # When switch_strategy_type revival fires, the agent picks a strategy
+    # it hasn't used before (or one at random from the pool).
+    # ------------------------------------------------------------------
+    _STRATEGY_POOL: Dict[str, Dict[str, Any]] = {
+        "TrendStrategy": {
+            "style": "趋势跟踪",
+            "params": {
+                "window": 15, "std_dev": 2.5, "atr_multiplier": 2.0,
+                "max_hold_bars": 36, "rsi_threshold": 35, "entry_zone": 0.3,
+                "use_adx": True, "adx_threshold": 20,
+            },
+        },
+        "PureActionStrategy": {
+            "style": "均值回归",
+            "params": {
+                "window": 20, "std_dev": 2.0, "atr_period": 14,
+                "atr_multiplier": 2.5, "max_hold_bars": 24,
+                "entry_zone": 0.0, "enable_short": True,
+            },
+        },
+        "GridStrategy": {
+            "style": "网格交易",
+            "params": {
+                "grid_spacing_pct": 0.008, "grid_levels": 5,
+                "base_size": 0.1, "atr_period": 14,
+                "atr_spacing_mult": 0.5, "max_position": 1.0,
+                "trend_ma_period": 100,
+            },
+        },
+        "HybridMeanRevMomentumStrategy": {
+            "style": "事件驱动",
+            "params": {
+                "rsi_period": 5, "rsi_low": 28, "rsi_high": 72,
+                "ma_period": 25, "atr_period": 12, "atr_multiplier": 3.5,
+                "max_hold_bars": 24, "enable_short": True,
+            },
+        },
+        "ScalpStrategy": {
+            "style": "超短线",
+            "params": {
+                "window": 10, "std_dev": 1.5, "atr_period": 8,
+                "atr_multiplier": 1.5, "max_hold_bars": 8,
+                "take_profit_pct": 0.015, "stop_loss_pct": 0.010,
+            },
+        },
+        "AdaptiveHybridStrategy": {
+            "style": "自适应混合",
+            "params": {
+                "trend_long_ma": 50, "trend_pull_ma": 20,
+                "rsi_period": 14, "rsi_low": 30, "rsi_high": 70,
+                "atr_period": 14, "atr_multiplier": 2.0,
+                "max_hold_bars": 30, "enable_short": True,
+            },
+        },
+        "HybridStrategy": {
+            "style": "混合策略",
+            "params": {
+                "window": 15, "std_dev": 2.0, "ma_period": 25,
+                "rsi_period": 14, "rsi_low": 30, "rsi_high": 70,
+                "atr_period": 14, "atr_multiplier": 2.5,
+                "max_hold_bars": 24, "enable_short": True,
+            },
+        },
+        "TrendFollowStrategy": {
+            "style": "趋势追随",
+            "params": {
+                "ma_period": 50, "atr_period": 14,
+                "atr_multiplier": 3.0, "max_hold_bars": 48,
+                "rsi_threshold": 40, "use_adx": True, "adx_threshold": 25,
+            },
+        },
+    }
+
+    def _apply_strategy_switch(agent: Any, current_name: str) -> str:
+        """Switch agent to a different strategy type.
+
+        Picks a strategy the agent hasn't used before; falls back to
+        random selection if all have been tried.
+
+        Returns the name of the selected strategy.
+        """
+        available = [n for n in _STRATEGY_POOL if n != current_name]
+        if not available:
+            available = list(_STRATEGY_POOL.keys())
+        picked = available[state["revival_count"] % len(available)]
+        defaults = _STRATEGY_POOL[picked]
+        agent.params = dict(defaults["params"])
+        agent.style = defaults["style"]
+        # Import strategy class lazily
+        from dex.strategies import __getattr__ as _get_cls
+        try:
+            agent.strategy_cls = _get_cls(picked)
+        except Exception:
+            pass  # Keep old class if import fails
+        return picked
+
+    # Track which strategy each agent is using (for switch decisions)
+    _agent_strategy: Dict[str, str] = {}
+    for a in agents:
+        cls_name = a.strategy_cls.__name__ if hasattr(a.strategy_cls, "__name__") else "TrendStrategy"
+        _agent_strategy[a.name] = cls_name
+
+    # Discrete parameters that must stay integers during mutation
+    _DISCRETE = frozenset({
+        "window", "atr_period", "max_hold_bars", "rsi_threshold",
+        "adx_threshold", "grid_levels", "trend_ma_period",
+        "rsi_period", "rsi_low", "rsi_high", "ma_period",
+    })
 
     agent_states: Dict[str, dict] = {
         a.name: {
@@ -625,21 +740,14 @@ def gepa_evolve_v2(
 
             if action == "widen_param_space":
                 scale = action_params.get("param_scale", 2.0)
-                # Discrete params that must stay integers
-                _discrete = {
-                    "window", "atr_period", "max_hold_bars", "rsi_threshold",
-                    "adx_threshold", "grid_levels", "trend_ma_period",
-                    "rsi_period", "rsi_low", "rsi_high", "ma_period",
-                }
                 for k in agent.params:
-                    # Skip boolean params — they are isinstance of int in Python
                     if isinstance(agent.params[k], bool):
                         continue
                     if isinstance(agent.params[k], (int, float)):
                         new_val = agent.params[k] * (
                             1 + np.random.uniform(-0.5, 0.5) * scale
                         )
-                        if k in _discrete:
+                        if k in _DISCRETE:
                             agent.params[k] = max(1, int(round(new_val)))
                         else:
                             agent.params[k] = new_val
@@ -648,6 +756,38 @@ def gepa_evolve_v2(
                 key = pool[state["revival_count"] % len(pool)]
                 if key in agent.params:
                     agent.params[key] = True
+            elif action == "remove_indicator":
+                pool = action_params.get("indicator_pool", ["use_adx"])
+                for key in pool:
+                    if key in agent.params and isinstance(agent.params[key], bool) and agent.params[key]:
+                        agent.params[key] = False
+                        break
+            elif action == "switch_strategy_type":
+                current = _agent_strategy.get(agent.name, "TrendStrategy")
+                picked = _apply_strategy_switch(agent, current)
+                _agent_strategy[agent.name] = picked
+                if verbose:
+                    print(f"     switched {agent.name} → {picked} ({agent.style})")
+            elif action == "switch_timeframe":
+                if on_revive is not None:
+                    new_fn, _ = on_revive(action, action_params)
+                    if new_fn is not None:
+                        evaluate_fn_raw = new_fn
+                        if verbose:
+                            print(f"     timeframe switched → {action_params.get('timeframes', 'unknown')}")
+                else:
+                    if verbose:
+                        print("     (timeframe switch skipped — no on_revive callback)")
+            elif action == "switch_symbol":
+                if on_revive is not None:
+                    new_fn, _ = on_revive(action, action_params)
+                    if new_fn is not None:
+                        evaluate_fn_raw = new_fn
+                        if verbose:
+                            print(f"     symbol switched → {action_params.get('symbols', 'unknown')}")
+                else:
+                    if verbose:
+                        print("     (symbol switch skipped — no on_revive callback)")
 
             # Reset rejection counter after revival (fresh start)
             state["consecutive_rejections"] = 0
@@ -739,23 +879,26 @@ def gepa_evolve_v2(
             if dead_count >= len(agents) * 0.75:
                 summary += (
                     f"\n\n  ⚠ 全部 {dead_count}/{len(agents)} Agent 枯竭！"
-                    f"\n  触发全局探索模式：扩大参数空间 + 启用新指标"
+                    f"\n  触发全局探索模式：扩大参数空间 + 切换策略类型"
                 )
-                _discrete = {
-                    "window", "atr_period", "max_hold_bars", "rsi_threshold",
-                    "adx_threshold", "grid_levels", "trend_ma_period",
-                    "rsi_period", "rsi_low", "rsi_high", "ma_period",
-                }
                 for a in agents:
-                    for k in a.params:
-                        if isinstance(a.params[k], bool):
-                            continue
-                        if isinstance(a.params[k], (int, float)):
-                            new_val = a.params[k] * (0.5 + np.random.random())
-                            if k in _discrete:
-                                a.params[k] = max(1, int(round(new_val)))
-                            else:
-                                a.params[k] = new_val
+                    # 50% chance: widen params; 50% chance: switch strategy
+                    if random.random() < 0.5:
+                        for k in a.params:
+                            if isinstance(a.params[k], bool):
+                                continue
+                            if isinstance(a.params[k], (int, float)):
+                                new_val = a.params[k] * (0.5 + np.random.random())
+                                if k in _DISCRETE:
+                                    a.params[k] = max(1, int(round(new_val)))
+                                else:
+                                    a.params[k] = new_val
+                    else:
+                        current = _agent_strategy.get(a.name, "TrendStrategy")
+                        picked = _apply_strategy_switch(a, current)
+                        _agent_strategy[a.name] = picked
+                        if verbose:
+                            print(f"     {a.name} → {picked}")
 
             # --- LLM hypothesis injection (after meta-reflection) ---
             if llm_generator is not None and llm_generator.is_available:
