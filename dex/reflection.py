@@ -793,6 +793,43 @@ def gepa_evolve_v2(
             state["consecutive_rejections"] = 0
             state["reflection_repeats"] = 0  # Reset: new params → new reflections expected
 
+            # --- LLM-powered hypothesis injection on revival ---
+            # When an agent is revived, ask the LLM to generate fresh
+            # hypotheses tailored to the agent's new state — this is
+            # the "generate_alternative_hypotheses" step from program.md.
+            if llm_generator is not None and llm_generator.is_available:
+                try:
+                    from dex.llm_hypothesis import inject_llm_hypotheses
+                    # Build a focused context: just this agent and recent
+                    # experiments involving it
+                    agent_experiments = [
+                        e for e in engine.experiment_logs
+                        if e.agent == agent.name
+                    ][-5:]
+                    # Include the trigger and action in the prompt via
+                    # blind_spots — they shape the generated hypotheses
+                    revival_context = (
+                        f"[{trigger}] Agent {agent.name} ({agent.style}) "
+                        f"触发复活，动作: {action}，参数: {action_params}"
+                    )
+                    inject_llm_hypotheses(
+                        engine=engine,
+                        generator=llm_generator,
+                        experiments=agent_experiments if agent_experiments else engine.experiment_logs[-3:],
+                        agents=[{
+                            "name": agent.name,
+                            "style": agent.style,
+                            "params": dict(agent.params),
+                            "recent_score": state["score_history"][-1] if state["score_history"] else 0.0,
+                            "revival_count": state["revival_count"],
+                        }],
+                        blind_spots=engine.blind_spots[-2:] + [revival_context],
+                        n=3,
+                    )
+                except Exception as e:
+                    if verbose:
+                        print(f"  [LLM] 复活假设生成失败: {e}")
+
         # --- Run experiment ---
         log = engine.run_experiment(
             agent_name=agent.name,
