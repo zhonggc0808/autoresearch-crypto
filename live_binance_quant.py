@@ -25,13 +25,13 @@ Usage:
     - 本脚本交易 Binance USD-M 永续合约，支持做多/做空双向
 """
 
+import argparse
+import functools
+import json
+import math
 import os
 import sys
 import time
-import json
-import math
-import argparse
-import functools
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -39,16 +39,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import ccxt
 import pandas as pd
 import torch
-import ccxt
 
 from train_quant import (
-    TrendStrategy,
-    ScalpStrategy,
-    HybridMeanRevMomentumStrategy,
     AdaptiveHybridStrategy,
+    HybridMeanRevMomentumStrategy,
     RegimeStrategy,
+    ScalpStrategy,
+    TrendStrategy,
 )
 
 LOG_DIR = "logs"

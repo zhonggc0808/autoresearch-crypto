@@ -7,8 +7,8 @@ Usage:
         --checkpoint checkpoints/hybrid_mm_eth60d.pt
 """
 
-import sys
 import os
+import sys
 
 # Ensure project root is on path for backward compat imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

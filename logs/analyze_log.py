@@ -1,6 +1,7 @@
-import re
 import csv
 import math
+import re
+
 import numpy as np
 
 

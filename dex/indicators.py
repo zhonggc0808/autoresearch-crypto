@@ -5,8 +5,9 @@ All functions accept numpy arrays (float64) and return numpy arrays.
 This single module replaces ~7 duplicated implementations across strategy classes.
 """
 
-import numpy as np
 from typing import Tuple
+
+import numpy as np
 
 
 def compute_atr(df: dict, period: int) -> np.ndarray:

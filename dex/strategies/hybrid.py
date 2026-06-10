@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from dex.indicators import compute_atr, compute_adx
+from dex.indicators import compute_adx, compute_atr
 from dex.strategies.base import BaseStrategy
 
 

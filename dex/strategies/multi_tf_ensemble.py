@@ -17,9 +17,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from dex.indicators import compute_ema, compute_rsi, compute_atr
+from dex.indicators import compute_atr, compute_ema, compute_rsi
 from dex.strategies.base import BaseStrategy
-
 
 # ---------------------------------------------------------------------------
 # Per-timeframe signal generator

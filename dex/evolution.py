@@ -18,11 +18,10 @@ import numpy as np
 import pandas as pd
 
 from dex.strategies.base import StrategyEvaluator
-from dex.strategies.trend import TrendStrategy
-from dex.strategies.pure_action import PureActionStrategy
 from dex.strategies.grid import GridStrategy
 from dex.strategies.hybrid_mm import HybridMeanRevMomentumStrategy
-
+from dex.strategies.pure_action import PureActionStrategy
+from dex.strategies.trend import TrendStrategy
 
 # ---------------------------------------------------------------------------
 # Agent definition

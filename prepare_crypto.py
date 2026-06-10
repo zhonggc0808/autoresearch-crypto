@@ -10,15 +10,15 @@ Usage:
 数据存储在项目目录下的 data/crypto/
 """
 
+import argparse
 import os
 import time
-import argparse
 
-import requests
-import pyarrow as pa
-import pyarrow.parquet as pq
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+import requests
 
 # 全局代理设置
 PROXY = {}

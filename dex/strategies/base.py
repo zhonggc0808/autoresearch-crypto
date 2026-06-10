@@ -8,13 +8,13 @@ import numpy as np
 import pandas as pd
 
 from dex.config import (
-    INITIAL_CAPITAL,
     COMMISSION,
-    SLIPPAGE,
     EVAL_MAX_DRAWDOWN,
     EVAL_MIN_EQUITY_RATIO,
     EVAL_MIN_RETURN,
     EVAL_MIN_TRADES,
+    INITIAL_CAPITAL,
+    SLIPPAGE,
 )
 
 

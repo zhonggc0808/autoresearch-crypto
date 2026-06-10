@@ -24,13 +24,13 @@ Usage:
     - 本脚本交易 OKX 永续合约（SWAP），支持做多/做空双向
 """
 
+import argparse
+import functools
+import json
+import math
 import os
 import sys
 import time
-import json
-import math
-import argparse
-import functools
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -40,18 +40,17 @@ load_dotenv()
 
 import pandas as pd
 import torch
-
 from okx.Account import AccountAPI
-from okx.Trade import TradeAPI
 from okx.MarketData import MarketAPI
 from okx.PublicData import PublicAPI
+from okx.Trade import TradeAPI
 
 from train_quant import (
-    TrendStrategy,
-    ScalpStrategy,
-    HybridMeanRevMomentumStrategy,
     AdaptiveHybridStrategy,
+    HybridMeanRevMomentumStrategy,
     RegimeStrategy,
+    ScalpStrategy,
+    TrendStrategy,
 )
 
 LOG_DIR = "logs"

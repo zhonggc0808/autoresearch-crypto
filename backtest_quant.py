@@ -7,27 +7,27 @@ Usage:
     uv run python backtest_quant.py --symbol ETHUSDT --interval 5m --days 14
 """
 
-import os
-import sys
 import argparse
 import math
+import os
+import sys
 
 import numpy as np
 import pandas as pd
 import torch
 
 from train_quant import (
+    COMMISSION,
+    INITIAL_CAPITAL,
+    SLIPPAGE,
+    AdaptiveHybridStrategy,
+    HybridMeanRevMomentumStrategy,
+    RegimeStrategy,
+    ScalpStrategy,
     StrategyEvaluator,
     TrendStrategy,
-    ScalpStrategy,
-    HybridMeanRevMomentumStrategy,
-    AdaptiveHybridStrategy,
-    RegimeStrategy,
-    load_crypto_data,
     list_crypto_files,
-    COMMISSION,
-    SLIPPAGE,
-    INITIAL_CAPITAL,
+    load_crypto_data,
 )
 
 

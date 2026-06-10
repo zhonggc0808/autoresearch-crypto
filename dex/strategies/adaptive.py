@@ -8,7 +8,7 @@ ADX determines market regime:
 
 import numpy as np
 
-from dex.indicators import compute_rsi, compute_adx, compute_atr, compute_ema
+from dex.indicators import compute_adx, compute_atr, compute_ema, compute_rsi
 from dex.strategies.base import BaseStrategy
 
 

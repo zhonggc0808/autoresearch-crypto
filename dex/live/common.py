@@ -5,18 +5,17 @@ Extracted from live_nado_quant.py and live_okx_quant.py to eliminate
 ~300 lines of duplicated code.
 """
 
-import os
-import sys
+import functools
 import json
 import math
+import os
+import sys
 import time
-import functools
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Callable, Optional, Tuple
 
 import pandas as pd
-
 
 # ---------------------------------------------------------------------------
 # Process lock (prevents duplicate instances)

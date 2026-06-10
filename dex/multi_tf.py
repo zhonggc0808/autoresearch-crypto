@@ -14,7 +14,6 @@ import pandas as pd
 
 from dex.indicators import compute_ema
 
-
 # Bars per timeframe (based on 5m base)
 TF_BARS: Dict[str, int] = {
     "15m": 3,
