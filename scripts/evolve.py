@@ -12,9 +12,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
-import json
 import warnings
 from datetime import datetime
 
@@ -26,12 +26,12 @@ warnings.filterwarnings("ignore")
 # Ensure project root on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dex.evolution import (
+from dex.config import DATA_DIR  # noqa: E402
+from dex.evolution import (  # noqa: E402
     EvolutionEngine,
     run_evolution,
 )
-from dex.strategies.base import StrategyEvaluator
-from dex.config import DATA_DIR
+from dex.strategies.base import StrategyEvaluator  # noqa: E402
 
 
 def evaluate_ensemble(engine: EvolutionEngine, df: pd.DataFrame) -> dict:
@@ -99,7 +99,7 @@ def main():
     args = parser.parse_args()
 
     # Load data
-    data_path = args.data or os.path.join(str(DATA_DIR), "ETHUSDT_5m.parquet")
+    data_path = args.data or os.path.join(str(DATA_DIR), "ETHUSDT_5m_60d.parquet")
     if not os.path.exists(data_path):
         print(f"Error: data file not found: {data_path}")
         sys.exit(1)

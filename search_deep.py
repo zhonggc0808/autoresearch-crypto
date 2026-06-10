@@ -3,29 +3,30 @@
 在粗搜索最优参数附近展开更密的网格。
 """
 
-import sys
-import os
-import time
-import json
 import itertools
+import json
+import os
+import sys
+import time
+import warnings
+
 import numpy as np
 import pyarrow.parquet as pq
-import warnings
 
 warnings.filterwarnings("ignore")
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from train_quant import (
-    HybridMeanRevMomentumStrategy,
+from train_quant import (  # noqa: E402
     AdaptiveHybridStrategy,
+    HybridMeanRevMomentumStrategy,
     PureActionStrategy,
     StrategyEvaluator,
 )
 
 DATA_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "data", "crypto", "ETHUSDT_5m.parquet"
+    os.path.dirname(os.path.abspath(__file__)), "data", "crypto", "ETHUSDT_5m_60d.parquet"
 )
 
 

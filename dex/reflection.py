@@ -24,7 +24,6 @@ from typing import Any, Callable, Dict, List, Tuple
 
 import numpy as np
 
-
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
@@ -161,6 +160,21 @@ class ReflectionEngine:
         self.hypotheses: List[Hypothesis] = list(HYPOTHESIS_TEMPLATES)
         self.meta_reflections: List[str] = []
         self.blind_spots: List[str] = []
+
+    def inject_hypotheses(self, hypotheses: List[Hypothesis]) -> None:
+        """Inject externally generated hypotheses into the engine.
+
+        New hypotheses are appended to the front of the queue so they
+        will be tested before any remaining template hypotheses.
+
+        Args:
+            hypotheses: List of Hypothesis objects to inject.
+        """
+        if not hypotheses:
+            return
+        # Insert at front so they get tested first
+        for h in reversed(hypotheses):
+            self.hypotheses.insert(0, h)
 
     # ------------------------------------------------------------------
     # Logging
@@ -526,11 +540,11 @@ def gepa_evolve(
 # GEPA V2 — with edge guards, mandatory reflection, and never-stop loop
 # ---------------------------------------------------------------------------
 
-from dex.scoring import (
-    risk_adjusted_score,
+from dex.scoring import (  # noqa: E402 — lazy import avoids circular dependency
     EdgeFlag,
     detect_dead_agent,
     pick_revival_action,
+    risk_adjusted_score,
 )
 
 
@@ -543,6 +557,7 @@ def gepa_evolve_v2(
     max_dd: float = 0.30,
     dead_threshold: int = 5,
     verbose: bool = True,
+    llm_generator: Any = None,  # Optional LLMHypothesisGenerator
 ) -> ReflectionEngine:
     """GEPA V2: risk-adjusted scoring + edge guards + never-stop revival.
 
@@ -589,27 +604,54 @@ def gepa_evolve_v2(
             print(f"  Agent: {agent.name} ({agent.style})")
             print(f"  假设: {hypothesis.text}")
 
-        # --- Edge guard: dead agent check ---
+        # --- Edge guard: multi-condition revival check ---
+        # Three independent triggers, any one can fire revival:
+        #   1. DEAD: score plateau for dead_threshold rounds (e.g. 5)
+        #   2. STALE: same reflection text for 3+ rounds → hypotheses exhausted
+        #   3. REJECT: 10+ consecutive rejections → stuck in local minimum
         is_dead = detect_dead_agent(state["score_history"], dead_threshold)
-        if is_dead and state["revival_count"] < 3:
+        is_stale = state["reflection_repeats"] >= 3
+        is_stuck = state["consecutive_rejections"] >= 10
+
+        need_revival = (is_dead or is_stale or is_stuck) and state["revival_count"] < 3
+
+        if need_revival:
             action, action_params = pick_revival_action(agent.name, state["revival_count"])
             state["revival_count"] += 1
+            trigger = "DEAD" if is_dead else ("STALE" if is_stale else "STUCK")
             if verbose:
-                print(f"  💤 DEAD detected — revival action: {action}")
+                print(f"  💤 {trigger} detected — revival action: {action}")
                 print(f"     params: {action_params}")
 
             if action == "widen_param_space":
                 scale = action_params.get("param_scale", 2.0)
+                # Discrete params that must stay integers
+                _discrete = {
+                    "window", "atr_period", "max_hold_bars", "rsi_threshold",
+                    "adx_threshold", "grid_levels", "trend_ma_period",
+                    "rsi_period", "rsi_low", "rsi_high", "ma_period",
+                }
                 for k in agent.params:
+                    # Skip boolean params — they are isinstance of int in Python
+                    if isinstance(agent.params[k], bool):
+                        continue
                     if isinstance(agent.params[k], (int, float)):
-                        agent.params[k] = agent.params[k] * (
+                        new_val = agent.params[k] * (
                             1 + np.random.uniform(-0.5, 0.5) * scale
                         )
+                        if k in _discrete:
+                            agent.params[k] = max(1, int(round(new_val)))
+                        else:
+                            agent.params[k] = new_val
             elif action == "add_indicator":
                 pool = action_params.get("indicator_pool", ["use_adx"])
                 key = pool[state["revival_count"] % len(pool)]
                 if key in agent.params:
                     agent.params[key] = True
+
+            # Reset rejection counter after revival (fresh start)
+            state["consecutive_rejections"] = 0
+            state["reflection_repeats"] = 0  # Reset: new params → new reflections expected
 
         # --- Run experiment ---
         log = engine.run_experiment(
@@ -646,22 +688,27 @@ def gepa_evolve_v2(
         log.edge_flags = edge_flags_str
 
         # --- Mandatory reflection enforcement ---
+        # Track reflection repetition independently — do NOT clear score_history
+        # (DEAD detection needs its own uninterrupted score history)
         if log.reflection == state["last_reflection"]:
             state["reflection_repeats"] += 1
-            if state["reflection_repeats"] >= 3:
-                if verbose:
-                    print("  ⚠ 连续3轮反思重复 — 标记为DEAD")
-                state["score_history"] = []  # Force dead detection next cycle
+            if state["reflection_repeats"] == 3 and verbose:
+                print("  ⚠ 反思连续3轮重复 — 下次轮到该Agent时将触发STALE恢复")
         else:
             state["reflection_repeats"] = 0
         state["last_reflection"] = log.reflection
 
         # Update params if improved
-        if scored.score > 0 and log.score_after > log.score_before:
+        # Accept if raw score improved AND no RISKY flag (OVERFIT is informational only)
+        is_risky = EdgeFlag.RISKY in scored.flags
+        improved = log.score_after > log.score_before
+        if improved and not is_risky:
             agent.params = log.params_after
             state["consecutive_rejections"] = 0
+            state["reflection_repeats"] = 0  # Reset: new params → new reflections expected
+            overfit_note = " [OVERFIT]" if EdgeFlag.OVERFIT in scored.flags else ""
             if verbose:
-                print(f"  ✓ 接受 (score {log.score_before:.3f}→{log.score_after:.3f})")
+                print(f"  ✓ 接受 (score {log.score_before:.3f}→{log.score_after:.3f}){overfit_note}")
                 print(
                     f"     risk-adj score={scored.score:.4f} "
                     f"sharpe_comp={scored.sharpe_component:.2f} "
@@ -694,10 +741,37 @@ def gepa_evolve_v2(
                     f"\n\n  ⚠ 全部 {dead_count}/{len(agents)} Agent 枯竭！"
                     f"\n  触发全局探索模式：扩大参数空间 + 启用新指标"
                 )
+                _discrete = {
+                    "window", "atr_period", "max_hold_bars", "rsi_threshold",
+                    "adx_threshold", "grid_levels", "trend_ma_period",
+                    "rsi_period", "rsi_low", "rsi_high", "ma_period",
+                }
                 for a in agents:
                     for k in a.params:
+                        if isinstance(a.params[k], bool):
+                            continue
                         if isinstance(a.params[k], (int, float)):
-                            a.params[k] = a.params[k] * (0.5 + np.random.random())
+                            new_val = a.params[k] * (0.5 + np.random.random())
+                            if k in _discrete:
+                                a.params[k] = max(1, int(round(new_val)))
+                            else:
+                                a.params[k] = new_val
+
+            # --- LLM hypothesis injection (after meta-reflection) ---
+            if llm_generator is not None and llm_generator.is_available:
+                try:
+                    from dex.llm_hypothesis import inject_llm_hypotheses
+                    inject_llm_hypotheses(
+                        engine=engine,
+                        generator=llm_generator,
+                        experiments=engine.experiment_logs,
+                        agents=agents,
+                        blind_spots=engine.blind_spots[-3:],
+                        n=4,
+                    )
+                except Exception as e:
+                    if verbose:
+                        print(f"  [LLM] 注入失败: {e}")
 
             if verbose:
                 print(summary)

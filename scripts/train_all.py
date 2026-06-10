@@ -25,21 +25,21 @@ import pyarrow.parquet as pq
 warnings.filterwarnings("ignore")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dex.strategies import (
-    TrendStrategy,
-    ScalpStrategy,
-    PureActionStrategy,
-    HybridStrategy,
-    TrendFollowStrategy,
-    HybridMeanRevMomentumStrategy,
+from dex.evolution import Agent  # noqa: E402
+from dex.reflection import ReflectionEngine, gepa_evolve_v2  # noqa: E402
+from dex.scoring import risk_adjusted_score  # noqa: E402
+from dex.strategies import (  # noqa: E402
     AdaptiveHybridStrategy,
+    HybridMeanRevMomentumStrategy,
+    HybridStrategy,
+    PureActionStrategy,
+    ScalpStrategy,
+    TrendFollowStrategy,
+    TrendStrategy,
 )
-from dex.strategies.base import StrategyEvaluator
-from dex.evolution import Agent
-from dex.reflection import ReflectionEngine, gepa_evolve_v2
-from dex.scoring import risk_adjusted_score
+from dex.strategies.base import StrategyEvaluator  # noqa: E402
 
-DATA_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "crypto", "ETHUSDT_5m.parquet")
+DATA_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "crypto", "ETHUSDT_5m_60d.parquet")
 CHECKPOINT_DIR = os.path.join(os.path.dirname(__file__), "..", "checkpoints")
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "..", "search_results")
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)

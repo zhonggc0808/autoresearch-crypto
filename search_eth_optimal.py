@@ -16,13 +16,13 @@ Usage:
     uv run python search_eth_optimal.py --quick  # 快速模式，缩短时间预算
 """
 
-import os
-import sys
-import math
-import time
-import json
 import argparse
 import itertools
+import json
+import math
+import os
+import sys
+import time
 from datetime import datetime
 
 # Fix Windows GBK encoding issues
@@ -36,18 +36,18 @@ import torch
 
 # 导入所有策略
 from train_quant import (
-    TrendStrategy,
-    ScalpStrategy,
-    PureActionStrategy,
-    HybridStrategy,
-    TrendFollowStrategy,
-    HybridMeanRevMomentumStrategy,
     AdaptiveHybridStrategy,
+    HybridMeanRevMomentumStrategy,
+    HybridStrategy,
+    PureActionStrategy,
+    ScalpStrategy,
     StrategyEvaluator,
+    TrendFollowStrategy,
+    TrendStrategy,
 )
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(PROJECT_DIR, "data", "crypto", "ETHUSDT_5m.parquet")
+DATA_FILE = os.path.join(PROJECT_DIR, "data", "crypto", "ETHUSDT_5m_60d.parquet")
 RESULTS_DIR = os.path.join(PROJECT_DIR, "search_results")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -260,7 +260,6 @@ def search_trend(df, time_budget=120, market_return=0.0):
     n = len(df)
     val_start = int(n * 0.85)
     val_df = df.iloc[val_start:].reset_index(drop=True)
-    val_ret = val_df["close"].iloc[-1] / val_df["close"].iloc[0] - 1
 
     # 扩展参数空间
     grid = {
@@ -716,7 +715,6 @@ def search_scalp(df, time_budget=120):
         except Exception:
             score = 0
             metrics = {}
-            trades = []
 
         tried += 1
         if score > best_score:
