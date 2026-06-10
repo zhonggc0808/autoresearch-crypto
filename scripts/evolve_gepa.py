@@ -193,6 +193,8 @@ def main():
             for tf in tfs:
                 rule = tf_map.get(tf, "15min")
                 try:
+                    if df["timestamp"].dtype != "datetime64[ns]":
+                        df["timestamp"] = pd.to_datetime(df["timestamp"])
                     df_resampled = df.set_index("timestamp").resample(rule).agg({
                         "open": "first", "high": "max", "low": "min",
                         "close": "last", "volume": "sum",
