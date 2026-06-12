@@ -9,13 +9,133 @@ import functools
 import json
 import math
 import os
+import smtplib
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
+from email.message import EmailMessage
 from typing import Any, Callable, Optional, Tuple
 
 import pandas as pd
+
+from dex.strategy_signals import generate_strategy_signals
+
+
+@dataclass(frozen=True)
+class EntryOrderPlan:
+    """Pure decision output for opening a new live position."""
+
+    action: str
+    side: Optional[str] = None
+    position_side: Optional[str] = None
+    size: float = 0.0
+    price: Optional[float] = None
+    notional: float = 0.0
+    target_position: int = 0
+    trade_type: Optional[str] = None
+    reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class CloseOrderPlan:
+    """Pure decision output for closing an existing live position."""
+
+    action: str
+    side: Optional[str] = None
+    position_side: Optional[str] = None
+    size: float = 0.0
+    price: Optional[float] = None
+    pnl_pct: float = 0.0
+    trade_type: Optional[str] = None
+    reason: Optional[str] = None
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def send_email_notification(
+    subject: str,
+    body: str,
+    *,
+    to_addr: Optional[str] = None,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """Send a best-effort SMTP notification without interrupting trading."""
+    recipient = to_addr or os.environ.get("TRADE_NOTIFY_EMAIL_TO", "")
+    if not recipient:
+        return False
+
+    smtp_user = os.environ.get("TRADE_NOTIFY_SMTP_USER", "")
+    smtp_password = os.environ.get("TRADE_NOTIFY_SMTP_PASSWORD", "")
+    if not smtp_user or not smtp_password:
+        if log_fn:
+            log_fn("[邮件通知跳过] 未配置 TRADE_NOTIFY_SMTP_USER / TRADE_NOTIFY_SMTP_PASSWORD")
+        return False
+
+    smtp_host = os.environ.get("TRADE_NOTIFY_SMTP_HOST", "smtp.163.com")
+    smtp_port = int(os.environ.get("TRADE_NOTIFY_SMTP_PORT", "465"))
+    smtp_from = os.environ.get("TRADE_NOTIFY_EMAIL_FROM", smtp_user)
+    timeout = float(os.environ.get("TRADE_NOTIFY_SMTP_TIMEOUT", "10"))
+    use_ssl = env_bool("TRADE_NOTIFY_SMTP_SSL", smtp_port == 465)
+    use_starttls = env_bool("TRADE_NOTIFY_SMTP_STARTTLS", not use_ssl)
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = smtp_from
+    msg["To"] = recipient
+    msg.set_content(body)
+
+    try:
+        if use_ssl:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=timeout) as smtp:
+                smtp.login(smtp_user, smtp_password)
+                smtp.send_message(msg)
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=timeout) as smtp:
+                if use_starttls:
+                    smtp.starttls()
+                smtp.login(smtp_user, smtp_password)
+                smtp.send_message(msg)
+        if log_fn:
+            log_fn(f"[邮件通知] 已发送: {subject} -> {recipient}")
+        return True
+    except Exception as exc:
+        if log_fn:
+            log_fn(f"[邮件通知失败] {subject}: {exc}")
+        return False
+
+
+def send_trade_notification(
+    action: str,
+    details: dict[str, Any],
+    *,
+    to_addr: Optional[str] = None,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> bool:
+    symbol = details.get("symbol", "")
+    mode = details.get("mode", "")
+    subject_parts = ["AutoCrypto"]
+    if mode:
+        subject_parts.append(str(mode))
+    if symbol:
+        subject_parts.append(str(symbol))
+    subject_parts.append(action)
+    subject = " | ".join(subject_parts)
+
+    lines = [f"动作: {action}", f"时间: {datetime.now().isoformat(timespec='seconds')}"]
+    for key, value in details.items():
+        if value is None:
+            continue
+        lines.append(f"{key}: {value}")
+    body = "\n".join(lines)
+    return send_email_notification(subject, body, to_addr=to_addr, log_fn=log_fn)
+
 
 # ---------------------------------------------------------------------------
 # Process lock (prevents duplicate instances)
@@ -191,7 +311,7 @@ def align_next_wake_time(interval_seconds: int, offset_seconds: int = 15) -> dat
 
 
 def predict_signal(strategy: Any, df: pd.DataFrame, enable_short: bool = False) -> Tuple[int, dict]:
-    """Generate trading signal and Bollinger Band display info.
+    """Generate trading signal and strategy display info.
 
     Args:
         strategy: Strategy object with ``generate_signals`` and ``window``,
@@ -200,26 +320,37 @@ def predict_signal(strategy: Any, df: pd.DataFrame, enable_short: bool = False) 
         enable_short: Whether short signals are allowed.
 
     Returns:
-        Tuple of (signal_id, bb_info). signal_id: 0=close, 1=hold,
+        Tuple of (signal_id, signal_info). signal_id: 0=close, 1=hold,
         2=long, 3=short.
     """
-    signals = strategy.generate_signals(df, enable_short=enable_short)
+    signals = generate_strategy_signals(strategy, df, enable_short=enable_short)
     signal_id = int(signals[-1])
 
     close = df["close"].values
-    window = strategy.window
-    rolling_mean = pd.Series(close).rolling(window=window, min_periods=window).mean()
-    rolling_std = pd.Series(close).rolling(window=window, min_periods=window).std()
-    upper = rolling_mean + strategy.std_dev * rolling_std
-    lower = rolling_mean - strategy.std_dev * rolling_std
+    if hasattr(strategy, "entry_lookback") and {"high", "low"}.issubset(df.columns):
+        window = max(1, int(getattr(strategy, "entry_lookback")))
+        high = df["high"].values
+        low = df["low"].values
+        upper = pd.Series(high).rolling(window=window, min_periods=window).max().shift(1)
+        lower = pd.Series(low).rolling(window=window, min_periods=window).min().shift(1)
+        mid = (upper + lower) / 2.0
+        label = "Donchian通道"
+    else:
+        window = max(1, int(strategy.window))
+        mid = pd.Series(close).rolling(window=window, min_periods=window).mean()
+        rolling_std = pd.Series(close).rolling(window=window, min_periods=window).std()
+        upper = mid + strategy.std_dev * rolling_std
+        lower = mid - strategy.std_dev * rolling_std
+        label = "布林带"
 
-    bb_info = {
+    signal_info = {
+        "label": label,
         "price": float(close[-1]),
         "upper": float(upper.iloc[-1]),
-        "mid": float(rolling_mean.iloc[-1]),
+        "mid": float(mid.iloc[-1]),
         "lower": float(lower.iloc[-1]),
     }
-    return signal_id, bb_info
+    return signal_id, signal_info
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +372,9 @@ def round_to_tick(price: float, tick_size: float) -> float:
     return float(Decimal(ticks) * Decimal(str(tick_size)))
 
 
-def compute_order_price(side: str, best_bid: float, best_ask: float, tick_size: float) -> float:
+def compute_order_price(
+    side: str, best_bid: Optional[float], best_ask: Optional[float], tick_size: float
+) -> Optional[float]:
     """Compute a POST_ONLY limit order price at the best bid/ask.
 
     Args:
@@ -254,12 +387,16 @@ def compute_order_price(side: str, best_bid: float, best_ask: float, tick_size: 
         Limit order price aligned to tick_size.
     """
     if side == "buy":
+        if best_bid is None:
+            return None
         price = best_bid
-        if price >= best_ask:
+        if best_ask is not None and price >= best_ask:
             price = best_ask - float(tick_size)
     else:
+        if best_ask is None:
+            return None
         price = best_ask
-        if price <= best_bid:
+        if best_bid is not None and price <= best_bid:
             price = best_bid + float(tick_size)
     return round_to_tick(price, tick_size)
 
@@ -285,6 +422,197 @@ def compute_ioc_price(
     if price is not None:
         price = round_to_tick(price, tick_size)
     return price
+
+
+def target_position_from_signal(signal_id: int, current_position: int) -> int:
+    """Map strategy signal IDs to target position direction."""
+    if signal_id == 2:
+        return 1
+    if signal_id == 3:
+        return -1
+    if signal_id == 0:
+        return 0
+    return current_position
+
+
+def quantize_order_size(
+    capital_per_trade: float, current_price: float, size_increment: float
+) -> float:
+    """Floor order size to the exchange size increment."""
+    if capital_per_trade <= 0 or current_price <= 0 or size_increment <= 0:
+        return 0.0
+
+    raw_size = Decimal(str(capital_per_trade)) / Decimal(str(current_price))
+    units = int(raw_size / Decimal(str(size_increment)))
+    return float(units * Decimal(str(size_increment)))
+
+
+def quantize_position_size(size: float, size_increment: float) -> float:
+    """Floor an existing position size to the exchange size increment."""
+    if size <= 0 or size_increment <= 0:
+        return 0.0
+    units = int(Decimal(str(size)) / Decimal(str(size_increment)))
+    return float(units * Decimal(str(size_increment)))
+
+
+def plan_entry_order(
+    *,
+    target_position: int,
+    current_position: int,
+    current_price: float,
+    capital_per_trade: float,
+    size_increment: float,
+    tick_size: float,
+    best_bid: Optional[float],
+    best_ask: Optional[float],
+    force_ioc: bool = False,
+    min_notional: float = 0.0,
+    min_maker_notional: float = 0.0,
+    fallback_to_current_price: bool = False,
+) -> EntryOrderPlan:
+    """Plan a new-position order without calling any exchange API."""
+    if target_position not in {-1, 1} or current_position != 0:
+        return EntryOrderPlan(action="skip", reason="no_entry_required")
+    if current_price <= 0:
+        return EntryOrderPlan(action="skip", reason="invalid_price")
+
+    size = quantize_order_size(capital_per_trade, current_price, size_increment)
+    notional = size * current_price
+    if size <= 0:
+        return EntryOrderPlan(action="skip", reason="zero_size", notional=notional)
+    if min_notional > 0 and notional < min_notional:
+        return EntryOrderPlan(
+            action="skip",
+            size=size,
+            notional=notional,
+            target_position=target_position,
+            reason="notional_below_minimum",
+        )
+
+    side = "buy" if target_position == 1 else "sell"
+    position_side = "long" if target_position == 1 else "short"
+    use_ioc = force_ioc or (min_maker_notional > 0 and notional < min_maker_notional)
+    action = "ioc" if use_ioc else "maker"
+
+    if use_ioc:
+        price = (
+            compute_ioc_price(side, best_bid, best_ask, tick_size)
+            if best_bid is not None and best_ask is not None
+            else None
+        )
+        if price is None and fallback_to_current_price:
+            multiplier = 1.001 if side == "buy" else 0.999
+            price = round_to_tick(current_price * multiplier, tick_size)
+        trade_type = "BUY_OPEN_IOC_FALLBACK" if target_position == 1 else "SELL_SHORT_IOC_FALLBACK"
+    else:
+        price = compute_order_price(side, best_bid, best_ask, tick_size)
+        if price is None and fallback_to_current_price:
+            multiplier = 0.999 if side == "buy" else 1.001
+            price = round_to_tick(current_price * multiplier, tick_size)
+        trade_type = "BUY_OPEN_MAKER" if target_position == 1 else "SELL_SHORT_MAKER"
+
+    if price is None:
+        return EntryOrderPlan(
+            action="skip",
+            side=side,
+            position_side=position_side,
+            size=size,
+            notional=notional,
+            target_position=target_position,
+            reason="missing_quote",
+        )
+
+    return EntryOrderPlan(
+        action=action,
+        side=side,
+        position_side=position_side,
+        size=size,
+        price=price,
+        notional=notional,
+        target_position=target_position,
+        trade_type=trade_type,
+    )
+
+
+def plan_close_order(
+    *,
+    current_position: int,
+    target_position: int,
+    strategy_size: float,
+    actual_position: float,
+    entry_price: float,
+    current_price: float,
+    size_increment: float,
+    tick_size: float,
+    best_bid: Optional[float],
+    best_ask: Optional[float],
+    fallback_to_current_price: bool = False,
+) -> CloseOrderPlan:
+    """Plan an existing-position close order without calling any exchange API."""
+    if current_position == 1 and target_position <= 0:
+        side = "sell"
+        position_side = "long"
+        raw_size = (
+            min(strategy_size, abs(actual_position)) if actual_position > 0 else strategy_size
+        )
+        pnl_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
+        prefix = "CLOSE_LONG"
+    elif current_position == -1 and target_position >= 0:
+        side = "buy"
+        position_side = "short"
+        raw_size = (
+            min(strategy_size, abs(actual_position)) if actual_position < 0 else strategy_size
+        )
+        pnl_pct = (entry_price - current_price) / entry_price if entry_price > 0 else 0.0
+        prefix = "CLOSE_SHORT"
+    else:
+        return CloseOrderPlan(action="skip", reason="no_close_required")
+
+    size = quantize_position_size(raw_size, size_increment)
+    if size <= 0:
+        return CloseOrderPlan(
+            action="skip",
+            side=side,
+            position_side=position_side,
+            pnl_pct=round(pnl_pct, 10),
+            reason="zero_size",
+        )
+
+    close_as_maker = pnl_pct > 0
+    action = "maker" if close_as_maker else "taker"
+    close_type = "Maker(TP)" if close_as_maker else "Taker(SL)"
+    if close_as_maker:
+        price = compute_order_price(side, best_bid, best_ask, tick_size)
+    else:
+        price = (
+            compute_ioc_price(side, best_bid, best_ask, tick_size)
+            if best_bid is not None and best_ask is not None
+            else None
+        )
+
+    if price is None and fallback_to_current_price:
+        multiplier = 1.001 if side == "buy" else 0.999
+        price = round_to_tick(current_price * multiplier, tick_size)
+
+    if price is None:
+        return CloseOrderPlan(
+            action="skip",
+            side=side,
+            position_side=position_side,
+            size=size,
+            pnl_pct=round(pnl_pct, 10),
+            reason="missing_quote",
+        )
+
+    return CloseOrderPlan(
+        action=action,
+        side=side,
+        position_side=position_side,
+        size=size,
+        price=price,
+        pnl_pct=round(pnl_pct, 10),
+        trade_type=f"{prefix}_{close_type}",
+    )
 
 
 # ---------------------------------------------------------------------------

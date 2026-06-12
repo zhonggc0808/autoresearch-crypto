@@ -10,6 +10,8 @@ This document describes all trading strategies available in `autoresearch-crypto
 | **Trend** | `TrendStrategy` | Bollinger Mean-reversion | Range-bound | Very Low | Medium |
 | **Scalp** | `ScalpStrategy` | High-frequency Scalping | High Volatility | Very High | High |
 | **TrendFollow** | `TrendFollowStrategy` | Trend Following | Strong Trends | Low | Medium |
+| **ChannelBreakout** | `ChannelBreakoutTrendStrategy` | Donchian Breakout | Strong Trends | Very Low | Medium |
+| **DirectionalTrend** | `DirectionalTrendStrategy` | Directional Trend | Strong Trends | Low | Medium |
 | **Grid** | `GridStrategy` | Grid Trading | Sideways | Medium | Low |
 | **PureAction** | `PureActionStrategy` | Extremes Reversal | Overbought/Oversold | Medium | Medium |
 | **Hybrid** | `HybridMomentumStrategy` | Momentum + Mean-reversion | Mixed | Medium | Medium |
@@ -115,6 +117,81 @@ Pure trend following with moving average crossovers.
 1. **Long Entry**: Fast MA crosses above Slow MA + volume confirmation
 2. **Short Entry**: Fast MA crosses below Slow MA
 3. **Exit**: Trailing ATR stop OR MA reversal
+
+---
+
+## DirectionalTrendStrategy
+
+**File**: `dex/strategies/long_bias.py`
+
+Directional trend participation for paper/live trials. It enters long when
+macro/medium trend, DI/ADX strength and momentum agree upward, enters short
+when they agree downward, then stays with the trend until an ATR stop, slow-MA
+break, RSI momentum break or optional time exit.
+
+### Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `fast_ma_period` | 50 | Fast EMA for trend participation |
+| `slow_ma_period` | 200 | Slow EMA for regime filter |
+| `macro_ma_period` | 400 | Macro EMA gate for long/short regime alignment |
+| `pullback_ma_period` | 20 | EMA used for pullback re-entry |
+| `breakout_lookback` | 48 | Breakout lookback window |
+| `adx_threshold` | 18 | Minimum trend-strength threshold |
+| `atr_multiplier` | 3.0 | ATR trailing stop distance |
+| `hard_stop_pct` | 4.5% | Hard stop from entry price |
+| `cooldown_bars` | 12 | Minimum bars to wait after an exit |
+| `enable_short` | True | Shorts are allowed when the trend is down |
+
+### Logic
+
+1. **Long Entry**: Macro uptrend + fast EMA above slow EMA + breakout, trend reclaim, or pullback reclaim.
+2. **Short Entry**: Macro downtrend + fast EMA below slow EMA + breakdown or trend reclaim.
+3. **Exit**: ATR trailing stop, hard stop, slow EMA break, RSI momentum break, or optional max hold.
+
+---
+
+## ChannelBreakoutTrendStrategy
+
+**File**: `dex/strategies/channel_breakout.py`
+
+Low-frequency Donchian channel breakout strategy. It flips long when price
+breaks the previous channel high, flips short when price breaks the previous
+channel low, and otherwise keeps the current position. It is designed for
+large directional regimes where tight mean-reversion entries and short ATR
+stops get shaken out by counter-trend rebounds.
+
+The strategy can optionally require trend quality before accepting a breakout:
+EMA direction, EMA slope, ADX strength, DI alignment, and ATR/pct breakout
+buffers. These filters are disabled by default so older checkpoints keep the
+same behavior, but search can enable them when the recent market favors cleaner
+trend-following entries.
+
+### Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `entry_lookback` | 8000 | Donchian channel lookback in bars |
+| `exit_lookback` | 0 | Optional faster Donchian exit channel; 0 disables |
+| `min_hold_bars` | 0 | Minimum bars before allowing a reversal |
+| `cooldown_bars` | 0 | Bars to wait after an emergency exit |
+| `emergency_stop_pct` | 0% | Optional catastrophic stop from entry |
+| `breakout_buffer_pct` | 0% | Require a pct buffer beyond the channel |
+| `breakout_atr_buffer` | 0.0 | Require an ATR buffer beyond the channel |
+| `trend_ma_period` | 0 | Optional EMA direction filter; 0 disables |
+| `trend_slope_lookback` | 0 | Optional EMA slope lookback |
+| `min_trend_slope` | 0% | Minimum EMA slope magnitude when slope filter is active |
+| `adx_threshold` | 0 | Optional ADX trend-strength threshold |
+| `require_di_alignment` | False | Require +DI/-DI to agree with breakout direction |
+| `enable_long` | True | Allow long breakouts |
+| `enable_short` | True | Allow short breakdowns |
+
+### Logic
+
+1. **Long Entry**: Close breaks the previous `entry_lookback` high after optional trend-quality filters.
+2. **Short Entry**: Close breaks the previous `entry_lookback` low after optional trend-quality filters.
+3. **Exit/Reversal**: Opposite channel breakout, optional faster `exit_lookback` channel, or emergency stop.
 
 ---
 

@@ -50,7 +50,7 @@ def compute_adx(df: dict, period: int = 14) -> Tuple[np.ndarray, np.ndarray, np.
     """
     high = np.asarray(df["high"], dtype=float)
     low = np.asarray(df["low"], dtype=float)
-    close = np.asarray(df["close"], dtype=float)
+    np.asarray(df["close"], dtype=float)
     n = len(high)
 
     plus_dm = np.zeros(n)

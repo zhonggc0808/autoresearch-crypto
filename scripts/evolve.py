@@ -26,12 +26,13 @@ warnings.filterwarnings("ignore")
 # Ensure project root on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dex.config import DATA_DIR  # noqa: E402
-from dex.evolution import (  # noqa: E402
+from dex.config import DATA_DIR
+from dex.evolution import (
     EvolutionEngine,
     run_evolution,
 )
-from dex.strategies.base import StrategyEvaluator  # noqa: E402
+from dex.strategies.base import StrategyEvaluator
+from dex.strategy_signals import generate_strategy_signals
 
 
 def evaluate_ensemble(engine: EvolutionEngine, df: pd.DataFrame) -> dict:
@@ -67,7 +68,7 @@ def compare_individual(engine: EvolutionEngine, df: pd.DataFrame) -> list[dict]:
     for agent in engine.agents:
         try:
             s = agent.strategy_cls(**agent.params)
-            signals = s.generate_signals(df)
+            signals = generate_strategy_signals(s, df, enable_short=True)
             equity, trades = evaluator.simulate(signals[min_start:], prices[min_start:])
             metrics = evaluator.compute_metrics(equity, trades)
             trade_pnls = [t for t in trades if t.get("pnl") is not None]
@@ -99,7 +100,7 @@ def main():
     args = parser.parse_args()
 
     # Load data
-    data_path = args.data or os.path.join(str(DATA_DIR), "ETHUSDT_5m_60d.parquet")
+    data_path = args.data or os.path.join(str(DATA_DIR), "ETHUSDT_5m.parquet")
     if not os.path.exists(data_path):
         print(f"Error: data file not found: {data_path}")
         sys.exit(1)

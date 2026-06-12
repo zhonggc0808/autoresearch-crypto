@@ -216,7 +216,7 @@ class TrendStrategy:
         """计算 ADX, +DI, -DI（用于趋势强度过滤和方向确认）"""
         high = df["high"].values
         low = df["low"].values
-        close = df["close"].values
+        df["close"].values
 
         plus_dm = np.zeros(len(high))
         minus_dm = np.zeros(len(high))
@@ -551,7 +551,6 @@ class TrendStrategy:
         # --- 信号生成主循环 ---
         signals = np.ones(n, dtype=int)
         position = 0
-        entry_price = 0.0
         entry_bar = 0
         highest_after_entry = 0.0
         lowest_after_entry = float("inf")
@@ -797,14 +796,12 @@ class TrendStrategy:
                         else:
                             signals[i] = 2
                             position = 1
-                            entry_price = price
                             entry_bar = i
                             highest_after_entry = high[i]
                             continue
                     else:
                         signals[i] = 2
                         position = 1
-                        entry_price = price
                         entry_bar = i
                         highest_after_entry = high[i]
                         continue
@@ -830,14 +827,12 @@ class TrendStrategy:
                         else:
                             signals[i] = 3
                             position = -1
-                            entry_price = price
                             entry_bar = i
                             lowest_after_entry = low[i]
                             continue
                     else:
                         signals[i] = 3
                         position = -1
-                        entry_price = price
                         entry_bar = i
                         lowest_after_entry = low[i]
                         continue
@@ -850,7 +845,6 @@ class TrendStrategy:
                         if not is_downtrend and price <= lower_trigger and not strong_downtrend:
                             signals[i] = 2
                             position = 1
-                            entry_price = price
                             entry_bar = i
                             highest_after_entry = high[i]
                             continue
@@ -860,7 +854,6 @@ class TrendStrategy:
                         if not is_uptrend and price >= upper_trigger and not strong_uptrend:
                             signals[i] = 3
                             position = -1
-                            entry_price = price
                             entry_bar = i
                             lowest_after_entry = low[i]
                             continue
@@ -872,7 +865,6 @@ class TrendStrategy:
                         if not is_downtrend and price <= lower_trigger and not strong_downtrend:
                             signals[i] = 2
                             position = 1
-                            entry_price = price
                             entry_bar = i
                             highest_after_entry = high[i]
                             continue
@@ -882,7 +874,6 @@ class TrendStrategy:
                         if not is_uptrend and price >= upper_trigger and not strong_uptrend:
                             signals[i] = 3
                             position = -1
-                            entry_price = price
                             entry_bar = i
                             lowest_after_entry = low[i]
                             continue
@@ -981,8 +972,8 @@ class ScalpStrategy:
         出场：回归均值 / 固定止盈 / 固定止损 / 超时
         """
         close = df["close"].values.astype(float)
-        high = df["high"].values.astype(float)
-        low = df["low"].values.astype(float)
+        df["high"].values.astype(float)
+        df["low"].values.astype(float)
         n = len(close)
 
         # 布林带
@@ -1195,7 +1186,7 @@ class PureActionStrategy:
         """计算 ADX 趋势强度。返回值越大趋势越强。"""
         high = df["high"].values.astype(float)
         low = df["low"].values.astype(float)
-        close = df["close"].values.astype(float)
+        df["close"].values.astype(float)
         n = len(high)
 
         plus_dm = np.zeros(n)
@@ -1282,7 +1273,6 @@ class PureActionStrategy:
         # --- 信号生成 ---
         signals = np.ones(n, dtype=int)
         position = 0
-        entry_price = 0.0
         entry_bar = 0
         highest_after_entry = 0.0
         lowest_after_entry = float("inf")
@@ -1364,7 +1354,6 @@ class PureActionStrategy:
                 if allow_long and price <= lower_trigger and not strong_downtrend:
                     signals[i] = 2
                     position = 1
-                    entry_price = price
                     entry_bar = i
                     highest_after_entry = high[i]
                     continue
@@ -1373,7 +1362,6 @@ class PureActionStrategy:
                 if allow_short and price >= upper_trigger and not strong_uptrend:
                     signals[i] = 3
                     position = -1
-                    entry_price = price
                     entry_bar = i
                     lowest_after_entry = low[i]
                     continue
@@ -1435,7 +1423,7 @@ class HybridStrategy:
     def _compute_adx(self, df, period=14):
         high = df["high"].values.astype(float)
         low = df["low"].values.astype(float)
-        close = df["close"].values.astype(float)
+        df["close"].values.astype(float)
         n = len(high)
         plus_dm = np.zeros(n)
         minus_dm = np.zeros(n)
@@ -1508,7 +1496,6 @@ class HybridStrategy:
         # --- 信号生成 ---
         signals = np.ones(n, dtype=int)
         position = 0
-        entry_price = 0.0
         entry_bar = 0
         highest_after_entry = 0.0
         lowest_after_entry = float("inf")
@@ -1584,7 +1571,6 @@ class HybridStrategy:
                     if long_cross:
                         signals[i] = 2
                         position = 1
-                        entry_price = price
                         entry_bar = i
                         highest_after_entry = high[i]
                         continue
@@ -1601,7 +1587,6 @@ class HybridStrategy:
                         if short_cross:
                             signals[i] = 3
                             position = -1
-                            entry_price = price
                             entry_bar = i
                             lowest_after_entry = low[i]
                             continue
@@ -1630,7 +1615,6 @@ class HybridStrategy:
                     if allow_long and price <= lower_trigger and not strong_downtrend:
                         signals[i] = 2
                         position = 1
-                        entry_price = price
                         entry_bar = i
                         highest_after_entry = high[i]
                         continue
@@ -1639,7 +1623,6 @@ class HybridStrategy:
                     if allow_short and price >= upper_trigger and not strong_uptrend:
                         signals[i] = 3
                         position = -1
-                        entry_price = price
                         entry_bar = i
                         lowest_after_entry = low[i]
                         continue
@@ -1724,7 +1707,6 @@ class TrendFollowStrategy:
         # --- 信号生成 ---
         signals = np.ones(n, dtype=int)
         position = 0
-        entry_price = 0.0
         entry_bar = 0
         highest_after_entry = 0.0
         lowest_after_entry = float("inf")
@@ -1797,7 +1779,6 @@ class TrendFollowStrategy:
                 if long_pullback:
                     signals[i] = 2
                     position = 1
-                    entry_price = price
                     entry_bar = i
                     highest_after_entry = high[i]
                     continue
@@ -1812,7 +1793,6 @@ class TrendFollowStrategy:
                     if short_bounce:
                         signals[i] = 3
                         position = -1
-                        entry_price = price
                         entry_bar = i
                         lowest_after_entry = low[i]
                         continue
@@ -1922,7 +1902,6 @@ class HybridMeanRevMomentumStrategy:
         # --- 信号生成 ---
         signals = np.ones(n, dtype=int)
         position = 0
-        entry_price = 0.0
         entry_bar = 0
         highest_after_entry = 0.0
         lowest_after_entry = float("inf")
@@ -1989,7 +1968,6 @@ class HybridMeanRevMomentumStrategy:
                 if long_cross:
                     signals[i] = 2
                     position = 1
-                    entry_price = price
                     entry_bar = i
                     highest_after_entry = high[i]
                     continue
@@ -2004,7 +1982,6 @@ class HybridMeanRevMomentumStrategy:
                 if short_cross:
                     signals[i] = 3
                     position = -1
-                    entry_price = price
                     entry_bar = i
                     lowest_after_entry = low[i]
                     continue
@@ -2094,7 +2071,7 @@ class AdaptiveHybridStrategy:
     def _compute_adx(self, df, period=14):
         high = df["high"].values.astype(float)
         low = df["low"].values.astype(float)
-        close = df["close"].values.astype(float)
+        df["close"].values.astype(float)
         n = len(high)
         plus_dm = np.zeros(n)
         minus_dm = np.zeros(n)
@@ -2151,7 +2128,7 @@ class AdaptiveHybridStrategy:
 
         # --- 趋势市 EMA ---
         trend_long = _ema(close, self.trend_long_ma)
-        trend_pull = _ema(close, self.trend_pull_ma)
+        _ema(close, self.trend_pull_ma)
 
         # --- ADX（市场状态判定）---
         adx = self._compute_adx(df, self.adx_period)
@@ -2458,7 +2435,6 @@ class StrategyEvaluator:
         trades = []
         entry_cost_basis = 0.0
         entry_price = 0.0
-        entry_step = 0
 
         for i in range(len(signals)):
             signal = signals[i]
@@ -2506,7 +2482,6 @@ class StrategyEvaluator:
                     shares = capital * (1 - self.commission) / exec_price
                     entry_cost_basis = capital
                     entry_price = exec_price
-                    entry_step = i
                     capital = 0.0
                     trades.append({"type": "buy", "step": i})
                     position = 1
@@ -2517,7 +2492,6 @@ class StrategyEvaluator:
                     shares = -(capital * (1 - self.commission) / exec_price)
                     entry_cost_basis = capital
                     entry_price = exec_price
-                    entry_step = i
                     # capital 暂存卖出所得（扣除手续费后）
                     capital = capital * (1 - self.commission)  # 卖出所得 = 本金 * (1-手续费)
                     trades.append({"type": "sell_short", "step": i})
@@ -3189,7 +3163,7 @@ def scalp_grid_search(df, time_budget=TIME_BUDGET):
     """
     n = len(df)
     train_size = int(n * 0.9)
-    train_df = df.iloc[:train_size].reset_index(drop=True)
+    df.iloc[:train_size].reset_index(drop=True)
     val_df = df.iloc[train_size:].reset_index(drop=True)
     val_prices = val_df["close"].values.astype(float)
 
@@ -3431,7 +3405,7 @@ def scalp_grid_search(df, time_budget=TIME_BUDGET):
         if is_best:
             best_s2_score = score
             best_s2_params = params.copy()
-            desc_parts = [k for k in combo if k.startswith("use_") or k in ("rsi_extreme_low",)]
+            [k for k in combo if k.startswith("use_") or k in ("rsi_extreme_low",)]
             best_s2_desc = str(combo) if combo else "无过滤器"
 
         if (idx + 1) % 2 == 0 or is_best:
@@ -3855,7 +3829,7 @@ def walk_forward_trend_search(df, time_budget=TIME_BUDGET, n_windows=5):
         val_start = train_end
         val_end = min(val_start + seg_size, n)
 
-        train_df = df.iloc[:train_end].reset_index(drop=True)
+        df.iloc[:train_end].reset_index(drop=True)
         val_df = df.iloc[val_start:val_end].reset_index(drop=True)
         val_prices = val_df["close"].values.astype(float)
 
@@ -4083,7 +4057,7 @@ def walk_forward_adx_search(df, time_budget=TIME_BUDGET, n_windows=5):
         val_start = train_end
         val_end = min(val_start + seg_size, n)
 
-        train_df = df.iloc[:train_end].reset_index(drop=True)
+        df.iloc[:train_end].reset_index(drop=True)
         val_df = df.iloc[val_start:val_end].reset_index(drop=True)
         val_prices = val_df["close"].values.astype(float)
 
@@ -4317,7 +4291,7 @@ def walk_forward_hybrid_search(df, time_budget=TIME_BUDGET, n_windows=5):
         val_start = train_end
         val_end = min(val_start + seg_size, n)
 
-        train_df = df.iloc[:train_end].reset_index(drop=True)
+        df.iloc[:train_end].reset_index(drop=True)
         val_df = df.iloc[val_start:val_end].reset_index(drop=True)
         val_prices = val_df["close"].values.astype(float)
 
@@ -4548,7 +4522,7 @@ def walk_forward_trendfollow_search(df, time_budget=TIME_BUDGET, n_windows=5):
         val_start = train_end
         val_end = min(val_start + seg_size, n)
 
-        train_df = df.iloc[:train_end].reset_index(drop=True)
+        df.iloc[:train_end].reset_index(drop=True)
         val_df = df.iloc[val_start:val_end].reset_index(drop=True)
         val_prices = val_df["close"].values.astype(float)
 
@@ -4768,7 +4742,7 @@ def walk_forward_hybrid_mm_search(df, time_budget=TIME_BUDGET, n_windows=5):
         val_start = train_end
         val_end = min(val_start + seg_size, n)
 
-        train_df = df.iloc[:train_end].reset_index(drop=True)
+        df.iloc[:train_end].reset_index(drop=True)
         val_df = df.iloc[val_start:val_end].reset_index(drop=True)
         val_prices = val_df["close"].values.astype(float)
 
@@ -5201,7 +5175,7 @@ def direct_trendfollow_search(df, time_budget=TIME_BUDGET):
     """
     直接在全量数据上搜索 TrendFollowStrategy 最优参数。
     """
-    n = len(df)
+    len(df)
     evaluator = StrategyEvaluator()
     prices = df["close"].values.astype(float)
 
@@ -5302,7 +5276,7 @@ def direct_hybrid_mm_search(df, time_budget=TIME_BUDGET):
     """
     直接在全量数据上搜索 HybridMeanRevMomentumStrategy 最优参数。
     """
-    n = len(df)
+    len(df)
     evaluator = StrategyEvaluator()
     prices = df["close"].values.astype(float)
 
@@ -5617,7 +5591,7 @@ def walk_forward_adaptive_search(df, time_budget=TIME_BUDGET, n_windows=5):
         val_start = train_end
         val_end = min(val_start + seg_size, n)
 
-        train_df = df.iloc[:train_end].reset_index(drop=True)
+        df.iloc[:train_end].reset_index(drop=True)
         val_df = df.iloc[val_start:val_end].reset_index(drop=True)
         val_prices = val_df["close"].values.astype(float)
 

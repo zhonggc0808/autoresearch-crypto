@@ -92,7 +92,6 @@ class GridStrategy(BaseStrategy):
 
         # Grid state
         base_price = close[0]
-        position = 0.0  # current net position (fraction of capital)
         signals = np.zeros(n, dtype=float)
 
         for i in range(1, n):

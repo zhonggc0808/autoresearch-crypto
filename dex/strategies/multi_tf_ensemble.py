@@ -195,7 +195,7 @@ class MultiTFEnsembleStrategy(BaseStrategy):
         votes = {}
 
         for tf_name in self.tf_weights:
-            tf_bars = self.TF_BARS.get(tf_name, 1)
+            self.TF_BARS.get(tf_name, 1)
             htf = self._resample(df, tf_name)
             htf_sig = _tf_signal(htf, **self.tf_params.get(tf_name, {}))
 

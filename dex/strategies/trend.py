@@ -482,7 +482,6 @@ class TrendStrategy(BaseStrategy):
         # --- 信号生成主循环 ---
         signals = np.ones(n, dtype=int)
         position = 0
-        entry_price = 0.0
         entry_bar = 0
         highest_after_entry = 0.0
         lowest_after_entry = float("inf")
@@ -728,14 +727,12 @@ class TrendStrategy(BaseStrategy):
                         else:
                             signals[i] = 2
                             position = 1
-                            entry_price = price
                             entry_bar = i
                             highest_after_entry = high[i]
                             continue
                     else:
                         signals[i] = 2
                         position = 1
-                        entry_price = price
                         entry_bar = i
                         highest_after_entry = high[i]
                         continue
@@ -761,14 +758,12 @@ class TrendStrategy(BaseStrategy):
                         else:
                             signals[i] = 3
                             position = -1
-                            entry_price = price
                             entry_bar = i
                             lowest_after_entry = low[i]
                             continue
                     else:
                         signals[i] = 3
                         position = -1
-                        entry_price = price
                         entry_bar = i
                         lowest_after_entry = low[i]
                         continue
@@ -781,7 +776,6 @@ class TrendStrategy(BaseStrategy):
                         if not is_downtrend and price <= lower_trigger and not strong_downtrend:
                             signals[i] = 2
                             position = 1
-                            entry_price = price
                             entry_bar = i
                             highest_after_entry = high[i]
                             continue
@@ -791,7 +785,6 @@ class TrendStrategy(BaseStrategy):
                         if not is_uptrend and price >= upper_trigger and not strong_uptrend:
                             signals[i] = 3
                             position = -1
-                            entry_price = price
                             entry_bar = i
                             lowest_after_entry = low[i]
                             continue
@@ -803,7 +796,6 @@ class TrendStrategy(BaseStrategy):
                         if not is_downtrend and price <= lower_trigger and not strong_downtrend:
                             signals[i] = 2
                             position = 1
-                            entry_price = price
                             entry_bar = i
                             highest_after_entry = high[i]
                             continue
@@ -813,7 +805,6 @@ class TrendStrategy(BaseStrategy):
                         if not is_uptrend and price >= upper_trigger and not strong_uptrend:
                             signals[i] = 3
                             position = -1
-                            entry_price = price
                             entry_bar = i
                             lowest_after_entry = low[i]
                             continue

@@ -16,9 +16,15 @@ __all__ = [
     "PureActionStrategy",
     "HybridStrategy",
     "TrendFollowStrategy",
+    "ChannelBreakoutTrendStrategy",
+    "DirectionalTrendStrategy",
+    "LongBiasTrendStrategy",
     "HybridMeanRevMomentumStrategy",
     "AdaptiveHybridStrategy",
     "GridStrategy",
+    "RegimeStrategy",
+    "PureActionV2Strategy",
+    "MultiTFEnsembleStrategy",
 ]
 
 
@@ -30,9 +36,15 @@ def __getattr__(name: str):
         "PureActionStrategy": "dex.strategies.pure_action",
         "HybridStrategy": "dex.strategies.hybrid",
         "TrendFollowStrategy": "dex.strategies.trend_follow",
+        "ChannelBreakoutTrendStrategy": "dex.strategies.channel_breakout",
+        "DirectionalTrendStrategy": "dex.strategies.long_bias",
+        "LongBiasTrendStrategy": "dex.strategies.long_bias",
         "HybridMeanRevMomentumStrategy": "dex.strategies.hybrid_mm",
         "AdaptiveHybridStrategy": "dex.strategies.adaptive",
         "GridStrategy": "dex.strategies.grid",
+        "RegimeStrategy": "dex.strategies.regime",
+        "PureActionV2Strategy": "dex.strategies.pure_action_v2",
+        "MultiTFEnsembleStrategy": "dex.strategies.multi_tf_ensemble",
     }
     if name in _imports:
         import importlib

@@ -104,7 +104,6 @@ class HybridStrategy(BaseStrategy):
         # --- 信号生成 ---
         signals = np.ones(n, dtype=int)
         position = 0
-        entry_price = 0.0
         entry_bar = 0
         highest_after_entry = 0.0
         lowest_after_entry = float("inf")
@@ -180,7 +179,6 @@ class HybridStrategy(BaseStrategy):
                     if long_cross:
                         signals[i] = 2
                         position = 1
-                        entry_price = price
                         entry_bar = i
                         highest_after_entry = high[i]
                         continue
@@ -197,7 +195,6 @@ class HybridStrategy(BaseStrategy):
                         if short_cross:
                             signals[i] = 3
                             position = -1
-                            entry_price = price
                             entry_bar = i
                             lowest_after_entry = low[i]
                             continue
@@ -226,7 +223,6 @@ class HybridStrategy(BaseStrategy):
                     if allow_long and price <= lower_trigger and not strong_downtrend:
                         signals[i] = 2
                         position = 1
-                        entry_price = price
                         entry_bar = i
                         highest_after_entry = high[i]
                         continue
@@ -235,7 +231,6 @@ class HybridStrategy(BaseStrategy):
                     if allow_short and price >= upper_trigger and not strong_uptrend:
                         signals[i] = 3
                         position = -1
-                        entry_price = price
                         entry_bar = i
                         lowest_after_entry = low[i]
                         continue

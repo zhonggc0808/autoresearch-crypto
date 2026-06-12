@@ -1,5 +1,5 @@
 """
-ETH 60天5分钟数据 — 最优策略全面搜索。
+ETH 5分钟数据 — 最优策略全面搜索。
 按策略类型分类搜索，然后横向对比选出最优。
 
 策略池:
@@ -10,6 +10,8 @@ ETH 60天5分钟数据 — 最优策略全面搜索。
   5. TrendFollowStrategy— EMA趋势跟随
   6. HybridMMStrategy   — RSI均值回归+动量
   7. AdaptiveHybridStrategy — ADX判市 + RSI/EMA切换
+  8. DirectionalTrendStrategy — 宏观趋势双向持仓
+  9. ChannelBreakoutTrendStrategy — 低频通道突破翻转
 
 Usage:
     uv run python search_eth_optimal.py
@@ -34,21 +36,25 @@ import numpy as np
 import pyarrow.parquet as pq
 import torch
 
-# 导入所有策略
-from train_quant import (
+from dex.data import list_crypto_files
+from dex.strategy_signals import generate_strategy_signals
+from dex.strategies import (
     AdaptiveHybridStrategy,
+    ChannelBreakoutTrendStrategy,
     HybridMeanRevMomentumStrategy,
     HybridStrategy,
+    LongBiasTrendStrategy,
     PureActionStrategy,
     ScalpStrategy,
-    StrategyEvaluator,
     TrendFollowStrategy,
     TrendStrategy,
 )
+from dex.strategies.base import StrategyEvaluator
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(PROJECT_DIR, "data", "crypto", "ETHUSDT_5m_60d.parquet")
+DATA_FILE = os.path.join(PROJECT_DIR, "data", "crypto", "ETHUSDT_5m.parquet")
 RESULTS_DIR = os.path.join(PROJECT_DIR, "search_results")
+CHECKPOINT_PATH = os.path.join(PROJECT_DIR, "checkpoints", "eth_optimal.pt")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 INITIAL_CAPITAL = 10000.0
@@ -116,7 +122,14 @@ def compute_final_score(metrics, trades, prefer_frequency=False):
 
 
 def load_data():
-    table = pq.read_table(DATA_FILE)
+    eth_files = [
+        f
+        for f in list_crypto_files()
+        if "ETHUSDT" in os.path.basename(f).upper() and "_5m" in os.path.basename(f)
+    ]
+    data_file = eth_files[0] if eth_files else DATA_FILE
+    print(f"  使用数据文件: {data_file}")
+    table = pq.read_table(data_file)
     df = table.to_pandas()
     df["close"] = df["close"].astype(float)
     df["high"] = df["high"].astype(float)
@@ -133,10 +146,10 @@ def load_data():
 
 def evaluate_strategy(strategy, df, evaluator, min_start=None):
     """评估策略在完整数据上的表现（使用相对市场基准的宽松评分）"""
-    signals = strategy.generate_signals(df)
+    signals = generate_strategy_signals(strategy, df, enable_short=True)
 
     if min_start is None:
-        min_start = getattr(strategy, "window", 20) * 2
+        min_start = getattr(strategy, "warmup_bars", getattr(strategy, "window", 20) * 2)
 
     prices = df["close"].values[min_start:].astype(float)
     valid_signals = signals[min_start:]
@@ -260,6 +273,7 @@ def search_trend(df, time_budget=120, market_return=0.0):
     n = len(df)
     val_start = int(n * 0.85)
     val_df = df.iloc[val_start:].reset_index(drop=True)
+    val_df["close"].iloc[-1] / val_df["close"].iloc[0] - 1
 
     # 扩展参数空间
     grid = {
@@ -518,6 +532,216 @@ def search_trendfollow(df, time_budget=120):
     )
     print(
         f"  TrendFollow: {tried}/{total} combos in {time.time() - t0:.0f}s | "
+        f"best score={best_score:.4f} ret={best_metrics.get('total_return', 0) * 100:+.2f}% "
+        f"sharpe={best_metrics.get('sharpe_ratio', 0):.2f} DD={best_metrics.get('max_drawdown', 0) * 100:.1f}% "
+        f"trades={n_trades}"
+    )
+    return best_params, best_score, best_metrics
+
+
+def search_directional_trend(df, time_budget=120):
+    """DirectionalTrendStrategy 参数搜索"""
+    evaluator = StrategyEvaluator()
+    n = len(df)
+    val_start = int(n * 0.70)
+    val_df = df.iloc[val_start:].reset_index(drop=True)
+
+    grid = {
+        "fast_ma_period": [20, 50, 80],
+        "slow_ma_period": [100, 150, 200, 300, 400],
+        "macro_ma_period": [400],
+        "pullback_ma_period": [10, 20, 50],
+        "breakout_lookback": [24, 48, 96],
+        "adx_threshold": [12.0, 18.0, 25.0],
+        "atr_multiplier": [2.0, 2.5, 3.0, 3.5],
+        "exit_ma_buffer": [0.002, 0.004, 0.008],
+    }
+
+    all_combos = list(itertools.product(*grid.values()))
+    total = len(all_combos)
+
+    best_score = -1
+    best_params = None
+    best_metrics = None
+    best_trades = []
+
+    t0 = time.time()
+    tried = 0
+
+    for combo in all_combos:
+        if time.time() - t0 > time_budget:
+            break
+
+        params = dict(zip(grid.keys(), combo))
+        if params["fast_ma_period"] >= params["slow_ma_period"]:
+            continue
+        if params["pullback_ma_period"] >= params["slow_ma_period"]:
+            continue
+
+        params.update(
+            {
+                "adx_period": 14,
+                "slope_lookback": 12,
+                "macro_slope_lookback": 48,
+                "min_trend_slope": 0.0,
+                "min_macro_slope": -0.001,
+                "require_macro_alignment": True,
+                "rsi_period": 14,
+                "entry_rsi_min": 42.0,
+                "entry_rsi_max": 88.0,
+                "exit_rsi": 35.0,
+                "pullback_zone": 0.006,
+                "breakout_buffer": 0.001,
+                "atr_period": 14,
+                "hard_stop_pct": 0.05,
+                "max_hold_bars": 0,
+                "cooldown_bars": 12,
+                "enable_short": True,
+            }
+        )
+        strategy = LongBiasTrendStrategy(**params)
+        score, metrics, trades, _ = evaluate_strategy(strategy, val_df, evaluator)
+
+        tried += 1
+        if score > best_score:
+            best_score = score
+            best_params = params
+            best_metrics = metrics
+            best_trades = trades
+
+    n_trades = len([t for t in best_trades if t.get("pnl") is not None])
+    print(
+        f"  DirectionalTrend: {tried}/{total} combos in {time.time() - t0:.0f}s | "
+        f"best score={best_score:.4f} ret={best_metrics.get('total_return', 0) * 100:+.2f}% "
+        f"sharpe={best_metrics.get('sharpe_ratio', 0):.2f} DD={best_metrics.get('max_drawdown', 0) * 100:.1f}% "
+        f"trades={n_trades}"
+    )
+    return best_params, best_score, best_metrics
+
+
+def search_channel_breakout(df, time_budget=120):
+    """ChannelBreakoutTrendStrategy 参数搜索"""
+    evaluator = StrategyEvaluator()
+    base_grid = {
+        "entry_lookback": [300, 350, 375, 400, 425, 450, 475, 500, 576, 1000, 2000, 4000, 8000],
+        "min_hold_bars": [0, 72, 144, 288, 432, 576],
+        "cooldown_bars": [0],
+        "emergency_stop_pct": [0.0, 0.30, 0.40],
+    }
+    neutral_filters = {
+        "exit_lookback": 0,
+        "breakout_buffer_pct": 0.0,
+        "breakout_atr_buffer": 0.0,
+        "atr_period": 14,
+        "trend_ma_period": 0,
+        "trend_slope_lookback": 0,
+        "min_trend_slope": 0.0,
+        "trend_buffer_pct": 0.0,
+        "adx_period": 14,
+        "adx_threshold": 0.0,
+        "require_di_alignment": False,
+    }
+    filter_variants = [
+        {},
+        {"exit_lookback": 576},
+        {"exit_lookback": 1440},
+        {"exit_lookback": 2880},
+        {"breakout_atr_buffer": 0.25},
+        {"breakout_atr_buffer": 0.50},
+        {"breakout_buffer_pct": 0.001},
+        {"trend_ma_period": 1000},
+        {"trend_ma_period": 2000},
+        {"trend_ma_period": 4000},
+        {"trend_ma_period": 2000, "trend_slope_lookback": 576, "min_trend_slope": 0.003},
+        {"trend_ma_period": 4000, "trend_slope_lookback": 576, "min_trend_slope": 0.003},
+        {"adx_threshold": 18.0},
+        {"adx_threshold": 22.0, "require_di_alignment": True},
+        {"trend_ma_period": 2000, "adx_threshold": 18.0},
+        {"breakout_atr_buffer": 0.25, "exit_lookback": 1440},
+        {"trend_ma_period": 2000, "exit_lookback": 1440},
+        {"trend_ma_period": 4000, "breakout_atr_buffer": 0.25},
+        {
+            "trend_ma_period": 2000,
+            "breakout_atr_buffer": 0.25,
+            "adx_threshold": 18.0,
+            "require_di_alignment": True,
+        },
+    ]
+
+    all_combos = []
+    seen = set()
+
+    def add_params(params):
+        key = tuple(sorted(params.items()))
+        if key not in seen:
+            seen.add(key)
+            all_combos.append(params)
+
+    # Keep the known slow Donchian trend-following champion in every search,
+    # especially quick mode where the expanded grid may not reach long lookbacks.
+    add_params(
+        {
+            **neutral_filters,
+            "entry_lookback": 8000,
+            "min_hold_bars": 0,
+            "cooldown_bars": 0,
+            "emergency_stop_pct": 0.0,
+            "enable_long": True,
+            "enable_short": True,
+        }
+    )
+    for entry_lookback, min_hold_bars in [(375, 432), (400, 72), (400, 432), (500, 432)]:
+        add_params(
+            {
+                **neutral_filters,
+                "entry_lookback": entry_lookback,
+                "min_hold_bars": min_hold_bars,
+                "cooldown_bars": 0,
+                "emergency_stop_pct": 0.0,
+                "enable_long": True,
+                "enable_short": True,
+            }
+        )
+
+    for combo in itertools.product(*base_grid.values()):
+        base_params = dict(zip(base_grid.keys(), combo))
+        for variant in filter_variants:
+            params = {
+                **neutral_filters,
+                **base_params,
+                **variant,
+                "enable_long": True,
+                "enable_short": True,
+            }
+            if 0 < params["exit_lookback"] >= params["entry_lookback"]:
+                continue
+            add_params(params)
+    total = len(all_combos)
+
+    best_score = -1
+    best_params = None
+    best_metrics = None
+    best_trades = []
+    t0 = time.time()
+    tried = 0
+
+    for params in all_combos:
+        if time.time() - t0 > time_budget:
+            break
+
+        strategy = ChannelBreakoutTrendStrategy(**params)
+        min_start = getattr(strategy, "warmup_bars", params["entry_lookback"])
+        score, metrics, trades, _ = evaluate_strategy(strategy, df, evaluator, min_start=min_start)
+        tried += 1
+        if score > best_score:
+            best_score = score
+            best_params = params
+            best_metrics = metrics
+            best_trades = trades
+
+    n_trades = len([t for t in best_trades if t.get("pnl") is not None])
+    print(
+        f"  ChannelBreakout: {tried}/{total} combos in {time.time() - t0:.0f}s | "
         f"best score={best_score:.4f} ret={best_metrics.get('total_return', 0) * 100:+.2f}% "
         f"sharpe={best_metrics.get('sharpe_ratio', 0):.2f} DD={best_metrics.get('max_drawdown', 0) * 100:.1f}% "
         f"trades={n_trades}"
@@ -793,6 +1017,17 @@ def full_validation(strategy_cls, params, df, strategy_name, evaluator=None):
     }
 
 
+def deployment_rank_key(result):
+    """Rank strategies for the deployable checkpoint, prioritising risk-adjusted quality."""
+    metrics = result["metrics"]
+    return (
+        result["score"],
+        result["wf_score"],
+        metrics.get("total_return", -1.0),
+        metrics.get("max_drawdown", -1.0),
+    )
+
+
 # ============================================================================
 # 主程序
 # ============================================================================
@@ -812,8 +1047,8 @@ def main():
         TIME_PER_STRATEGY = 180  # 默认每策略3分钟
 
     print("=" * 70)
-    print("ETH 60天 5分钟数据 — 最优策略全面搜索")
-    print(f"时间预算: {TIME_PER_STRATEGY}s/策略 × 7策略 = {TIME_PER_STRATEGY * 7}s")
+    print("ETH 5分钟数据 — 最优策略全面搜索")
+    print(f"时间预算: {TIME_PER_STRATEGY}s/策略 × 9策略 = {TIME_PER_STRATEGY * 9}s")
     print("=" * 70)
 
     # 加载数据
@@ -821,7 +1056,8 @@ def main():
     df = load_data()
     print(f"  数据: {len(df)} 根K线, {df['datetime'].min()} → {df['datetime'].max()}")
     print(f"  价格范围: {df['close'].min():.1f} - {df['close'].max():.1f}")
-    print(f"  价格变化: {(df['close'].iloc[-1] / df['close'].iloc[0] - 1) * 100:+.2f}%")
+    market_return = df["close"].iloc[-1] / df["close"].iloc[0] - 1
+    print(f"  价格变化: {market_return * 100:+.2f}%")
 
     # 市场特征分析
     rets = df["close"].pct_change().dropna()
@@ -841,6 +1077,8 @@ def main():
     # 策略池
     strategy_configs = [
         ("TrendStrategy", TrendStrategy, search_trend, False),
+        ("ChannelBreakout", ChannelBreakoutTrendStrategy, search_channel_breakout, False),
+        ("DirectionalTrend", LongBiasTrendStrategy, search_directional_trend, False),
         ("PureAction", PureActionStrategy, search_pure, False),
         ("Hybrid", HybridStrategy, search_hybrid, False),
         ("TrendFollow", TrendFollowStrategy, search_trendfollow, False),
@@ -896,12 +1134,12 @@ def main():
         except Exception as e:
             print(f"   [ERR] 验证异常: {e}")
 
-    # 排序：按WF评分优先
-    validated.sort(key=lambda x: x["wf_score"], reverse=True)
+    # 排序：生产 checkpoint 更看重全量风险调整质量；WF 作为稳定性兜底。
+    validated.sort(key=deployment_rank_key, reverse=True)
 
     # 汇总报告
     print("\n" + "=" * 70)
-    print("最终排名 (按 Walk-Forward 稳定性评分)")
+    print("最终排名 (按风险调整综合评分，WF 作稳定性兜底)")
     print("=" * 70)
     print(
         f"{'排名':<5} {'策略':<15} {'评分':>8} {'WF评分':>8} {'收益':>8} {'夏普':>7} {'回撤':>7} {'胜率':>7} {'交易':>6} {'稳定':>6}"
@@ -917,9 +1155,10 @@ def main():
             f"{v['n_trades']:>6} {v['wf_stability']:>6.2f}"
         )
 
-    # 保存最优策略
-    if validated:
-        champion = validated[0]
+    # 保存最优策略：必须跑赢同期买入持有，避免把弱策略写入主 checkpoint。
+    eligible = [v for v in validated if v["metrics"].get("total_return", -1.0) >= market_return]
+    if eligible:
+        champion = eligible[0]
         print(f"\n{'=' * 70}")
         print(f"🏆 冠军策略: {champion['name']}")
         print(f"{'=' * 70}")
@@ -945,12 +1184,15 @@ def main():
                 for v in validated
             ],
             "search_time": search_time,
+            "benchmark": {
+                "buy_hold_return": market_return,
+                "excess_return": champion["metrics"]["total_return"] - market_return,
+            },
             "timestamp": datetime.now().isoformat(),
         }
 
-        checkpoint_path = os.path.join(PROJECT_DIR, "checkpoints", "eth_optimal.pt")
-        torch.save(checkpoint, checkpoint_path)
-        print(f"\n最优参数已保存: {checkpoint_path}")
+        torch.save(checkpoint, CHECKPOINT_PATH)
+        print(f"\n最优参数已保存: {CHECKPOINT_PATH}")
 
         # 保存可读报告
         report_path = os.path.join(RESULTS_DIR, "eth_optimal_report.json")
@@ -968,6 +1210,10 @@ def main():
                         k: (float(v) if isinstance(v, (np.floating, np.integer)) else v)
                         for k, v in champion["metrics"].items()
                     },
+                    "benchmark": {
+                        "buy_hold_return": float(market_return),
+                        "excess_return": float(champion["metrics"]["total_return"] - market_return),
+                    },
                     "ranking": [
                         {
                             "rank": i + 1,
@@ -983,6 +1229,8 @@ def main():
                 ensure_ascii=False,
             )
         print(f"报告已保存: {report_path}")
+    else:
+        print("\n未找到跑赢买入持有基准的策略，保留现有 checkpoint 不覆盖。")
 
     print("\n完成!")
 

@@ -13,6 +13,7 @@ Usage:
 import argparse
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -159,11 +160,11 @@ EXCHANGES = {
 
 def download_binance(symbol, interval, start_ts, end_ts):
     """
-    使用 Binance API 下载 K线数据
+    使用 Binance API 下载 K线数据（复用 Session 以减少 TCP 握手开销）
 
     Binance API 特点：
     - 支持 startTime/endTime 指定范围
-    - 每次最多返回 1000 条（我们用 100）
+    - 每次最多返回 1000 条
     - 数据从 startTime 到 endTime 按时间顺序
     """
     interval_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
@@ -171,66 +172,86 @@ def download_binance(symbol, interval, start_ts, end_ts):
 
     all_candles = []
     current_start = start_ts
+    batch_count = 0
 
     print(
-        f"    开始下载 {symbol} {interval} 从 {days_between(start_ts, end_ts):.1f} 天前...",
+        f"    [{symbol}] 开始下载 {interval} 从 {days_between(start_ts, end_ts):.0f} 天前...",
         flush=True,
     )
 
-    while current_start < end_ts:
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                params = {
-                    "symbol": symbol,
-                    "interval": timeframe,
-                    "startTime": current_start,
-                    "endTime": end_ts,
-                    "limit": 100,
-                }
+    session = requests.Session()
+    try:
+        while current_start < end_ts:
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    params = {
+                        "symbol": symbol,
+                        "interval": timeframe,
+                        "startTime": current_start,
+                        "endTime": end_ts,
+                        "limit": 1000,
+                    }
 
-                response = requests.get(
-                    EXCHANGES["binance"]["kline_url"], params=params, proxies=PROXY, timeout=30
-                )
-
-                if response.status_code == 451:
-                    # Binance 451 错误通常是地区限制，尝试不同端点
-                    print("    451 错误，尝试备用端点...", flush=True)
-                    response = requests.get(
-                        "https://api.binance.us/api/v3/klines", params=params, timeout=30
+                    response = session.get(
+                        EXCHANGES["binance"]["kline_url"],
+                        params=params,
+                        proxies=PROXY,
+                        timeout=30,
                     )
 
-                response.raise_for_status()
-                data = response.json()
+                    if response.status_code == 451:
+                        # Binance 451 错误通常是地区限制，尝试不同端点
+                        print(f"    [{symbol}] 451 错误，尝试备用端点...", flush=True)
+                        response = session.get(
+                            "https://api.binance.us/api/v3/klines",
+                            params=params,
+                            timeout=30,
+                        )
 
-                if not data:
-                    print("    无更多数据，停止", flush=True)
-                    return all_candles
+                    response.raise_for_status()
+                    data = response.json()
 
-                # Binance 返回格式:
-                # [open_time, open, high, low, close, volume, close_time, ...]
-                for c in data:
-                    ts = int(c[0])
-                    if ts >= start_ts and ts <= end_ts:
-                        all_candles.append(c)
+                    if not data:
+                        print(f"    [{symbol}] 无更多数据，停止", flush=True)
+                        return all_candles
 
-                print(f"    +{len(data)} (累计 {len(all_candles)})", flush=True)
+                    # Binance 返回格式:
+                    # [open_time, open, high, low, close, volume, close_time, ...]
+                    for c in data:
+                        ts = int(c[0])
+                        if ts >= start_ts and ts <= end_ts:
+                            all_candles.append(c)
 
-                # 更新下次开始时间
-                current_start = int(data[-1][0]) + 1
-                time.sleep(0.2)
+                    batch_count += 1
 
-                # 如果返回数据少于 limit，说明到头了
-                if len(data) < 100:
-                    return all_candles
-                break
+                    # 更新下次开始时间
+                    current_start = int(data[-1][0]) + 1
 
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    time.sleep(2**attempt)
-                else:
-                    print(f"    失败: {e}", flush=True)
-                    return all_candles
+                    # 每 50 批输出一次进度，不刷屏
+                    if batch_count % 50 == 0:
+                        print(
+                            f"    [{symbol}] {batch_count} 批 (累计 {len(all_candles)} 根K线)",
+                            flush=True,
+                        )
+
+                    # 轻量限速：Binance 公开 API 限频 1200/min，375 批远未触及
+                    # 仅保留极短的间隔避免 Burst 触发
+                    time.sleep(0.02)
+
+                    # 如果返回数据少于 limit，说明到头了
+                    if len(data) < 1000:
+                        return all_candles
+                    break
+
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        time.sleep(2**attempt)
+                    else:
+                        print(f"    [{symbol}] 下载失败: {e}", flush=True)
+                        return all_candles
+    finally:
+        session.close()
 
     return all_candles
 
@@ -313,8 +334,8 @@ def prepare_crypto_data_streaming(symbol, interval, start_days, force=False):
     return True
 
 
-def prepare_crypto_data(symbols=None, interval=None, start_days=None, force=False):
-    """下载并处理加密货币数据"""
+def prepare_crypto_data(symbols=None, interval=None, start_days=None, force=False, workers=3):
+    """下载并处理加密货币数据（多线程并行下载不同交易对）"""
     if symbols is None:
         symbols = DEFAULT_SYMBOLS
     if interval is None:
@@ -323,14 +344,33 @@ def prepare_crypto_data(symbols=None, interval=None, start_days=None, force=Fals
         start_days = DEFAULT_START_DAYS
 
     os.makedirs(DATA_DIR, exist_ok=True)
+    max_workers = min(workers, len(symbols))
 
     print(f"数据目录: {DATA_DIR}")
     print(f"下载周期: {interval}, 从 {start_days} 天前开始")
     print(f"交易对: {symbols}")
+    print(f"并行线程: {max_workers}")
     print()
 
-    for symbol in symbols:
-        prepare_crypto_data_streaming(symbol, interval, start_days, force=force)
+    if max_workers <= 1:
+        # 单线程：保持原来的简单日志
+        for symbol in symbols:
+            prepare_crypto_data_streaming(symbol, interval, start_days, force=force)
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    prepare_crypto_data_streaming, symbol, interval, start_days, force
+                ): symbol
+                for symbol in symbols
+            }
+            for future in as_completed(futures):
+                symbol = futures[future]
+                try:
+                    future.result()
+                    print(f"  [{symbol}] ✅ 完成", flush=True)
+                except Exception as e:
+                    print(f"  [{symbol}] ❌ 失败: {e}", flush=True)
 
     print()
     print("数据准备完成!")
@@ -344,9 +384,16 @@ if __name__ == "__main__":
     )
     parser.add_argument("--limit", type=int, default=60, help="下载多少天的数据")
     parser.add_argument("--force", action="store_true", help="强制重新下载，即使文件已存在")
+    parser.add_argument(
+        "--workers", type=int, default=3, help="并行下载线程数 (默认 3，设为 1 恢复串行)"
+    )
     args = parser.parse_args()
 
     symbols = [args.symbol] if args.symbol else DEFAULT_SYMBOLS
     prepare_crypto_data(
-        symbols=symbols, interval=args.interval, start_days=args.limit, force=args.force
+        symbols=symbols,
+        interval=args.interval,
+        start_days=args.limit,
+        force=args.force,
+        workers=args.workers,
     )

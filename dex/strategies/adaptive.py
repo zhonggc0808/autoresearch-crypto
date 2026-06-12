@@ -88,7 +88,7 @@ class AdaptiveHybridStrategy(BaseStrategy):
 
         # --- Trending regime EMAs ---
         trend_long = compute_ema(close, self.trend_long_ma)
-        trend_pull = compute_ema(close, self.trend_pull_ma)
+        compute_ema(close, self.trend_pull_ma)
 
         # --- ADX (market-state classification) ---
         adx, _, _ = compute_adx(df, self.adx_period)
@@ -99,7 +99,6 @@ class AdaptiveHybridStrategy(BaseStrategy):
         # --- Signal generation ---
         signals = np.ones(n, dtype=int)
         position = 0
-        entry_price = 0.0
         entry_bar = 0
         highest_after_entry = 0.0
         lowest_after_entry = float("inf")
@@ -177,7 +176,6 @@ class AdaptiveHybridStrategy(BaseStrategy):
                         if long_cross:
                             signals[i] = 2
                             position = 1
-                            entry_price = price
                             entry_bar = i
                             highest_after_entry = high[i]
                             continue
@@ -190,7 +188,6 @@ class AdaptiveHybridStrategy(BaseStrategy):
                         if short_cross:
                             signals[i] = 3
                             position = -1
-                            entry_price = price
                             entry_bar = i
                             lowest_after_entry = low[i]
                             continue
@@ -200,7 +197,6 @@ class AdaptiveHybridStrategy(BaseStrategy):
                     if long_cross:
                         signals[i] = 2
                         position = 1
-                        entry_price = price
                         entry_bar = i
                         highest_after_entry = high[i]
                         continue
@@ -210,7 +206,6 @@ class AdaptiveHybridStrategy(BaseStrategy):
                         if short_cross:
                             signals[i] = 3
                             position = -1
-                            entry_price = price
                             entry_bar = i
                             lowest_after_entry = low[i]
                             continue

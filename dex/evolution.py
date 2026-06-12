@@ -22,6 +22,7 @@ from dex.strategies.grid import GridStrategy
 from dex.strategies.hybrid_mm import HybridMeanRevMomentumStrategy
 from dex.strategies.pure_action import PureActionStrategy
 from dex.strategies.trend import TrendStrategy
+from dex.strategy_signals import generate_strategy_signals
 
 # ---------------------------------------------------------------------------
 # Agent definition
@@ -269,13 +270,7 @@ class EvolutionEngine:
         try:
             valid_params = self._filter_params(agent.strategy_cls, agent.params)
             strategy = agent.strategy_cls(**valid_params)
-            signals = strategy.generate_signals(df)
-
-            # GridStrategy returns float positions → convert to discrete
-            if signals.dtype in (np.float64, np.float32, float):
-                from dex.strategies.grid import grid_signals_to_discrete
-
-                signals = grid_signals_to_discrete(signals, df["close"].values.astype(float))
+            signals = generate_strategy_signals(strategy, df, enable_short=True)
 
             min_start = getattr(strategy, "window", 20) * 2
             prices = df["close"].values[min_start:].astype(float)
@@ -434,13 +429,7 @@ class EvolutionEngine:
             try:
                 valid_params = self._filter_params(agent.strategy_cls, agent.params)
                 strategy = agent.strategy_cls(**valid_params)
-                signals = strategy.generate_signals(df)
-
-                # GridStrategy returns floats → convert
-                if signals.dtype in (np.float64, np.float32, float):
-                    from dex.strategies.grid import grid_signals_to_discrete
-
-                    signals = grid_signals_to_discrete(signals, df["close"].values.astype(float))
+                signals = generate_strategy_signals(strategy, df, enable_short=enable_short)
 
                 # Convert signals to -1/0/+1 for voting
                 vote = np.zeros(n, dtype=float)

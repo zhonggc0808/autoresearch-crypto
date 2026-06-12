@@ -66,7 +66,6 @@ class TrendFollowStrategy(BaseStrategy):
 
         signals = np.ones(n, dtype=int)
         position = 0
-        entry_price = 0.0
         entry_bar = 0
         highest_after_entry = 0.0
         lowest_after_entry = float("inf")
@@ -139,7 +138,6 @@ class TrendFollowStrategy(BaseStrategy):
                 if long_pullback:
                     signals[i] = 2
                     position = 1
-                    entry_price = price
                     entry_bar = i
                     highest_after_entry = high[i]
                     continue
@@ -154,7 +152,6 @@ class TrendFollowStrategy(BaseStrategy):
                     if short_bounce:
                         signals[i] = 3
                         position = -1
-                        entry_price = price
                         entry_bar = i
                         lowest_after_entry = low[i]
                         continue

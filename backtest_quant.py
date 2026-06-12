@@ -14,21 +14,25 @@ import sys
 
 import numpy as np
 import pandas as pd
-import torch
 
-from train_quant import (
+from dex.checkpoints import (
+    build_strategy_from_checkpoint,
+    load_checkpoint,
+)
+from dex.config import (
     COMMISSION,
     INITIAL_CAPITAL,
     SLIPPAGE,
-    AdaptiveHybridStrategy,
-    HybridMeanRevMomentumStrategy,
-    RegimeStrategy,
-    ScalpStrategy,
-    StrategyEvaluator,
-    TrendStrategy,
-    list_crypto_files,
-    load_crypto_data,
 )
+from dex.data import list_crypto_files, load_crypto_data
+from dex.drawdown_guard import DrawdownGuardStats, apply_drawdown_guard
+from dex.regime_filter import (
+    RegimeFilterStats,
+    apply_regime_short_filter,
+    build_daily_regime_labels,
+)
+from dex.strategies.base import StrategyEvaluator
+from dex.strategy_signals import generate_strategy_signals
 
 
 class SimpleBacktest:
@@ -186,12 +190,81 @@ class SimpleBacktest:
 
 def backtest(strategy, df):
     """Walk-forward 回测：逐根 K 线生成信号"""
-    signals = strategy.generate_signals(df)
+    signals = generate_strategy_signals(strategy, df, enable_short=True)
     # 去掉前 window 条无法有效计算布林带的数据
     valid_start = strategy.window
     df_aligned = df.iloc[valid_start:].reset_index(drop=True)
     signals_aligned = signals[valid_start:]
     return signals_aligned, df_aligned
+
+
+def normalize_signals_for_position_mode(signals: np.ndarray, long_only: bool = False) -> np.ndarray:
+    """Return signals adjusted for the requested position mode."""
+    normalized = np.asarray(signals, dtype=int).copy()
+    if long_only:
+        normalized[normalized == 3] = 1
+    return normalized
+
+
+def buy_hold_signals(length: int) -> np.ndarray:
+    """Return a buy-once-then-hold signal array for benchmark comparison."""
+    signals = np.ones(max(0, length), dtype=int)
+    if length > 0:
+        signals[0] = 2
+    return signals
+
+
+def print_regime_filter_stats(
+    stats: RegimeFilterStats,
+    fast_days: int,
+    slow_days: int,
+) -> None:
+    """Print deterministic historical regime filter diagnostics."""
+    bull_pct = stats.bullish_bars / stats.total_bars * 100 if stats.total_bars else 0.0
+    bear_pct = stats.bearish_bars / stats.total_bars * 100 if stats.total_bars else 0.0
+    neutral_pct = stats.neutral_bars / stats.total_bars * 100 if stats.total_bars else 0.0
+    print("=" * 60)
+    print("Regime 过滤（日线EMA，使用前一日确认状态）")
+    print("=" * 60)
+    print(f"EMA参数:      fast={fast_days}d slow={slow_days}d")
+    print(f"BULL K线:     {stats.bullish_bars}/{stats.total_bars} ({bull_pct:.2f}%)")
+    print(f"BEAR K线:     {stats.bearish_bars}/{stats.total_bars} ({bear_pct:.2f}%)")
+    print(f"NEUTRAL K线:  {stats.neutral_bars}/{stats.total_bars} ({neutral_pct:.2f}%)")
+    print(
+        "BULL首尾:     "
+        f"{stats.first_bull_time or '无'}"
+        f" ~ {stats.last_bull_time or '无'}"
+    )
+    print(
+        "BEAR首尾:     "
+        f"{stats.first_bear_time or '无'}"
+        f" ~ {stats.last_bear_time or '无'}"
+    )
+    print("过滤规则:      BULL/NEUTRAL 禁空，BEAR 多空都允许")
+    print(f"非BEAR屏蔽SHORT信号: {stats.blocked_short_signals}")
+    print(f"非BEAR平空触发:      {stats.closed_short_positions}")
+    print()
+
+
+def print_drawdown_guard_stats(stats: DrawdownGuardStats) -> None:
+    """Print drawdown guard diagnostics."""
+    pct = stats.guarded_bars / stats.total_bars * 100 if stats.total_bars else 0.0
+    print("=" * 60)
+    print("策略自身回撤熔断")
+    print("=" * 60)
+    print(f"触发阈值:      {stats.max_dd_guard * 100:.2f}%")
+    print(f"恢复阈值:      {stats.recovery_dd * 100:.2f}%")
+    print(f"触发次数:      {stats.guard_entries}")
+    print(f"恢复次数:      {stats.guard_exits}")
+    print(f"熔断K线:       {stats.guarded_bars}/{stats.total_bars} ({pct:.2f}%)")
+    print(f"强制平仓:      {stats.forced_closes}")
+    print(f"内部最大回撤:  {stats.max_observed_drawdown * 100:.2f}%")
+    print(
+        "熔断首尾:      "
+        f"{stats.first_guard_time or '无'}"
+        f" ~ {stats.last_guard_time or '无'}"
+    )
+    print()
 
 
 def main():
@@ -205,6 +278,62 @@ def main():
     parser.add_argument(
         "--output", type=str, default="backtest_result.csv", help="回测结果输出文件"
     )
+    parser.add_argument(
+        "--long-only",
+        action="store_true",
+        help="强制只做多；覆盖 checkpoint 中的 enable_short 并移除做空信号",
+    )
+    parser.add_argument(
+        "--bull-regime-filter",
+        action="store_true",
+        dest="legacy_bull_regime_filter",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--regime-filter",
+        action="store_true",
+        help="启用日线EMA regime过滤：BULL/NEUTRAL禁空，BEAR多空都允许",
+    )
+    parser.add_argument(
+        "--regime-fast-days",
+        dest="regime_fast_days",
+        type=int,
+        default=50,
+        help="regime过滤快EMA天数",
+    )
+    parser.add_argument(
+        "--regime-slow-days",
+        dest="regime_slow_days",
+        type=int,
+        default=200,
+        help="regime过滤慢EMA天数",
+    )
+    parser.add_argument(
+        "--bull-fast-days",
+        dest="regime_fast_days",
+        type=int,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--bull-slow-days",
+        dest="regime_slow_days",
+        type=int,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--max-dd-guard",
+        nargs="?",
+        const=0.25,
+        default=None,
+        type=float,
+        help="启用策略自身回撤熔断；不填数值时默认0.25，不传则关闭",
+    )
+    parser.add_argument(
+        "--recovery-dd",
+        type=float,
+        default=0.15,
+        help="回撤熔断恢复阈值，默认0.15",
+    )
     args = parser.parse_args()
 
     # 加载策略参数
@@ -215,60 +344,10 @@ def main():
         print(f"错误: 未找到 {args.checkpoint}")
         sys.exit(1)
 
-    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    checkpoint = load_checkpoint(args.checkpoint)
     params = checkpoint.get("params", {})
     strategy_type = checkpoint.get("strategy", "bollinger_trend_filter")
-
-    if strategy_type == "scalp":
-        strategy = ScalpStrategy(
-            window=params.get("window", 10),
-            std_dev=params.get("std_dev", 1.2),
-            take_profit_pct=params.get("take_profit_pct", 0.005),
-            stop_loss_pct=params.get("stop_loss_pct", 0.003),
-            max_hold_bars=params.get("max_hold_bars", 6),
-        )
-    elif strategy_type == "hybrid_mm":
-        strategy = HybridMeanRevMomentumStrategy(
-            rsi_period=params.get("rsi_period", 14),
-            rsi_low=params.get("rsi_low", 25),
-            rsi_high=params.get("rsi_high", 75),
-            ma_period=params.get("ma_period", 20),
-            atr_period=params.get("atr_period", 14),
-            atr_multiplier=params.get("atr_multiplier", 2.0),
-            max_hold_bars=params.get("max_hold_bars", 24),
-            enable_short=params.get("enable_short", True),
-        )
-    elif strategy_type == "adaptive":
-        strategy = AdaptiveHybridStrategy(
-            rsi_period=params.get("rsi_period", 14),
-            rsi_low=params.get("rsi_low", 30),
-            rsi_high=params.get("rsi_high", 70),
-            ma_period=params.get("ma_period", 20),
-            trend_long_ma=params.get("trend_long_ma", 100),
-            trend_pull_ma=params.get("trend_pull_ma", 20),
-            adx_period=params.get("adx_period", 14),
-            adx_threshold=params.get("adx_threshold", 25),
-            atr_period=params.get("atr_period", 14),
-            atr_multiplier=params.get("atr_multiplier", 2.0),
-            max_hold_bars=params.get("max_hold_bars", 24),
-            enable_short=params.get("enable_short", True),
-        )
-    elif strategy_type == "regime":
-        strategy = RegimeStrategy(
-            ranging_params=params.get("ranging_params", {}),
-            trending_params=params.get("trending_params", {}),
-            adx_threshold=params.get("adx_threshold", 20),
-            enable_short=params.get("enable_short", True),
-        )
-    else:
-        strategy = TrendStrategy(
-            window=params.get("window", 20),
-            std_dev=params.get("std_dev", 2.0),
-            atr_multiplier=params.get("atr_multiplier", 2.5),
-            max_hold_bars=params.get(
-                "max_hold_bars", args.max_hold if hasattr(args, "max_hold") else 48
-            ),
-        )
+    strategy = build_strategy_from_checkpoint(checkpoint)
     print(f"策略类型: {strategy_type} | 参数: {params}")
     print()
 
@@ -301,28 +380,54 @@ def main():
     print()
 
     # 执行回测
-    print("=" * 60)
-    print("执行回测（多空双向，手续费+滑点模拟）...")
-    print("=" * 60)
-    enable_short = params.get("enable_short", True)
-    # 不同策略的 generate_signals 签名不同
-    if strategy_type == "adaptive":
-        signals = strategy.generate_signals(df)
-    elif strategy_type == "regime":
-        signals = strategy.generate_signals(df, enable_short=enable_short)
-    else:
-        signals = strategy.generate_signals(df, enable_short=enable_short)
+    enable_short = bool(params.get("enable_short", True)) and not args.long_only
+    long_only = not enable_short
+    if hasattr(strategy, "enable_short"):
+        strategy.enable_short = enable_short
 
-    min_idx = strategy.window
+    print("=" * 60)
+    mode_label = "只做多" if long_only else "多空双向"
+    print(f"执行回测（{mode_label}，手续费+滑点模拟）...")
+    print("=" * 60)
+    raw_signals = generate_strategy_signals(strategy, df, enable_short=enable_short)
+    signals = raw_signals
+    regime_filter_stats = None
+    if args.regime_filter or args.legacy_bull_regime_filter:
+        regimes = build_daily_regime_labels(
+            df, fast_days=args.regime_fast_days, slow_days=args.regime_slow_days
+        )
+        signals, regime_filter_stats = apply_regime_short_filter(signals, regimes, df)
+
+    signals = normalize_signals_for_position_mode(signals, long_only=long_only)
+
+    min_idx = getattr(strategy, "window", getattr(strategy, "long_ma_period", 20))
     prices = df["close"].values[min_idx:]
     valid_signals = signals[min_idx:]
     valid_df = df.iloc[min_idx:].reset_index(drop=True)
+    drawdown_guard_stats = None
+    if args.max_dd_guard is not None:
+        valid_signals, drawdown_guard_stats = apply_drawdown_guard(
+            valid_signals,
+            prices,
+            valid_df,
+            max_dd_guard=args.max_dd_guard,
+            recovery_dd=args.recovery_dd,
+            initial_capital=INITIAL_CAPITAL,
+            commission=COMMISSION,
+            slippage=SLIPPAGE,
+        )
+        signals[min_idx:] = valid_signals
 
     evaluator = StrategyEvaluator(
         initial_capital=INITIAL_CAPITAL, commission=COMMISSION, slippage=SLIPPAGE
     )
     score, metrics, trades = evaluator.evaluate(valid_signals, prices, valid_df)
     n_trades = len([t for t in trades if t.get("pnl") is not None])
+
+    benchmark_signals = buy_hold_signals(len(valid_signals))
+    _, benchmark_metrics, benchmark_trades = evaluator.evaluate(benchmark_signals, prices, valid_df)
+    benchmark_n_trades = len([t for t in benchmark_trades if t.get("pnl") is not None])
+    excess_return = metrics["total_return"] - benchmark_metrics["total_return"]
 
     # 输出结果
     print()
@@ -340,6 +445,26 @@ def main():
     print(f"最大回撤:    {metrics['max_drawdown'] * 100:.2f}%")
     print(f"胜率:        {metrics['win_rate'] * 100:.1f}%")
     print(f"交易次数:    {n_trades}")
+    print()
+
+    if regime_filter_stats is not None:
+        print_regime_filter_stats(
+            regime_filter_stats,
+            fast_days=args.regime_fast_days,
+            slow_days=args.regime_slow_days,
+        )
+
+    if drawdown_guard_stats is not None:
+        print_drawdown_guard_stats(drawdown_guard_stats)
+
+    print("=" * 60)
+    print("买入持有基准（同一有效区间，含手续费+滑点）")
+    print("=" * 60)
+    print(f"基准收益率:  {benchmark_metrics['total_return'] * 100:.2f}%")
+    print(f"基准年化:    {benchmark_metrics['annualized_return'] * 100:.2f}%")
+    print(f"基准回撤:    {benchmark_metrics['max_drawdown'] * 100:.2f}%")
+    print(f"基准交易:    {benchmark_n_trades}")
+    print(f"超额收益:    {excess_return * 100:+.2f}%")
     print()
 
     if trades:

@@ -66,7 +66,7 @@ def backtest_bb_strategy(
     bids = [e["bid"] for e in entries]
     asks = [e["ask"] for e in entries]
     bb_lowers = [e["bb_lower"] for e in entries]
-    bb_mids = [e["bb_mid"] for e in entries]
+    [e["bb_mid"] for e in entries]
 
     # Compute MA trend if specified
     ma_trend = None

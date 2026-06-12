@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from dex.config import (
+    BARS_PER_YEAR,
     COMMISSION,
     EVAL_MAX_DRAWDOWN,
     EVAL_MIN_EQUITY_RATIO,
@@ -115,7 +116,6 @@ class StrategyEvaluator:
         trades: List[Dict[str, Any]] = []
         entry_cost_basis = 0.0
         entry_price = 0.0
-        entry_step = 0
 
         for i in range(len(signals)):
             signal = signals[i]
@@ -163,7 +163,6 @@ class StrategyEvaluator:
                     shares = capital * (1 - self.commission) / exec_price
                     entry_cost_basis = capital
                     entry_price = exec_price
-                    entry_step = i
                     capital = 0.0
                     trades.append({"type": "buy", "step": i})
                     position = 1
@@ -174,7 +173,6 @@ class StrategyEvaluator:
                     shares = -(capital * (1 - self.commission) / exec_price)
                     entry_cost_basis = capital
                     entry_price = exec_price
-                    entry_step = i
                     capital = capital * (1 - self.commission)
                     trades.append({"type": "sell_short", "step": i})
                     position = -1
@@ -232,7 +230,7 @@ class StrategyEvaluator:
         total_return: float = (equity[-1] / equity[0]) - 1
 
         n_steps = len(equity)
-        years = n_steps * 5 / (288 * 365)
+        years = n_steps / BARS_PER_YEAR
         if years < 0.01:
             years = 0.01
         # Clamp to prevent overflow

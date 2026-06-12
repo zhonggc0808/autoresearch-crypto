@@ -89,8 +89,8 @@ class ScalpStrategy(BaseStrategy):
         Exit: mean-reversion / fixed take-profit / fixed stop-loss / timeout.
         """
         close = df["close"].values.astype(float)
-        high = df["high"].values.astype(float)
-        low = df["low"].values.astype(float)
+        df["high"].values.astype(float)
+        df["low"].values.astype(float)
         n = len(close)
 
         # Bollinger Bands

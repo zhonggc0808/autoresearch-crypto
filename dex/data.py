@@ -1,6 +1,7 @@
 """Data loading utilities for cryptocurrency OHLCV data."""
 
 import os
+import re
 from pathlib import Path
 from typing import List, Optional
 
@@ -8,6 +9,11 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from dex.config import DATA_DIR
+
+
+def _tagged_day_count(filename: str) -> int:
+    match = re.search(r"_(\d+)d\.parquet$", filename)
+    return int(match.group(1)) if match else -1
 
 
 def list_crypto_files(data_dir: Optional[str] = None) -> List[str]:
@@ -43,7 +49,7 @@ def list_crypto_files(data_dir: Optional[str] = None) -> List[str]:
     for key, fnames in grouped.items():
         tagged = [f for f in fnames if len(f.replace(".parquet", "").split("_")) >= 3]
         if tagged:
-            selected.append(sorted(tagged)[-1])  # largest day count
+            selected.append(max(tagged, key=_tagged_day_count))
         else:
             selected.append(fnames[0])
 

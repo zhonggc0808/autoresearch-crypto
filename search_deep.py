@@ -18,7 +18,8 @@ warnings.filterwarnings("ignore")
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from train_quant import (  # noqa: E402
+from dex.strategy_signals import generate_strategy_signals
+from train_quant import (
     AdaptiveHybridStrategy,
     HybridMeanRevMomentumStrategy,
     PureActionStrategy,
@@ -26,13 +27,13 @@ from train_quant import (  # noqa: E402
 )
 
 DATA_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "data", "crypto", "ETHUSDT_5m_60d.parquet"
+    os.path.dirname(os.path.abspath(__file__)), "data", "crypto", "ETHUSDT_5m.parquet"
 )
 
 
 def evaluate_strategy(strategy, df, evaluator, min_start=None):
     """宽松评估：相对市场基准评分"""
-    signals = strategy.generate_signals(df)
+    signals = generate_strategy_signals(strategy, df, enable_short=True)
     if min_start is None:
         min_start = getattr(strategy, "window", 20) * 2
     prices = df["close"].values[min_start:].astype(float)

@@ -25,25 +25,38 @@ import pyarrow.parquet as pq
 warnings.filterwarnings("ignore")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dex.evolution import Agent  # noqa: E402
-from dex.reflection import ReflectionEngine, gepa_evolve_v2  # noqa: E402
-from dex.scoring import risk_adjusted_score  # noqa: E402
-from dex.strategies import (  # noqa: E402
+from dex.data import list_crypto_files
+from dex.evolution import Agent
+from dex.reflection import ReflectionEngine, gepa_evolve_v2
+from dex.scoring import risk_adjusted_score
+from dex.strategies import (
     AdaptiveHybridStrategy,
+    ChannelBreakoutTrendStrategy,
     HybridMeanRevMomentumStrategy,
     HybridStrategy,
+    LongBiasTrendStrategy,
     PureActionStrategy,
     ScalpStrategy,
     TrendFollowStrategy,
     TrendStrategy,
 )
-from dex.strategies.base import StrategyEvaluator  # noqa: E402
+from dex.strategies.base import StrategyEvaluator
+from dex.strategy_signals import generate_strategy_signals
 
-DATA_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "crypto", "ETHUSDT_5m_60d.parquet")
+DATA_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "crypto", "ETHUSDT_5m.parquet")
 CHECKPOINT_DIR = os.path.join(os.path.dirname(__file__), "..", "checkpoints")
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "..", "search_results")
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
+
+
+def resolve_eth_data_file():
+    eth_files = [
+        f
+        for f in list_crypto_files()
+        if "ETHUSDT" in os.path.basename(f).upper() and "_5m" in os.path.basename(f)
+    ]
+    return eth_files[0] if eth_files else DATA_FILE
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +66,7 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 
 def relaxed_eval(strategy, df, evaluator):
     """Evaluate strategy with relative-to-market scoring."""
-    signals = strategy.generate_signals(df)
+    signals = generate_strategy_signals(strategy, df, enable_short=True)
     min_start = getattr(strategy, "window", 20) * 2
     prices = df["close"].values[min_start:].astype(float)
     valid = signals[min_start:]
@@ -163,6 +176,34 @@ ALL_STRATEGIES = [
             "entry_zone": [0.0, 0.3],
             "trend_ma_period": [50, 100],
             "adx_threshold": [20, 25, 30],
+        },
+    ),
+    (
+        "DirectionalTrend",
+        LongBiasTrendStrategy,
+        {
+            "fast_ma_period": [20, 50, 80],
+            "slow_ma_period": [100, 200, 300],
+            "macro_ma_period": [400],
+            "pullback_ma_period": [10, 20, 50],
+            "breakout_lookback": [24, 48, 96],
+            "adx_threshold": [12.0, 18.0, 25.0],
+            "atr_multiplier": [2.0, 2.5, 3.0, 3.5],
+            "exit_ma_buffer": [0.002, 0.004, 0.008],
+            "cooldown_bars": [12],
+            "enable_short": [True],
+        },
+    ),
+    (
+        "ChannelBreakout",
+        ChannelBreakoutTrendStrategy,
+        {
+            "entry_lookback": [576, 1000, 2000, 4000, 8000],
+            "min_hold_bars": [0, 288, 576],
+            "cooldown_bars": [0],
+            "emergency_stop_pct": [0.0, 0.30, 0.40],
+            "enable_long": [True],
+            "enable_short": [True],
         },
     ),
     (
@@ -316,7 +357,9 @@ def main():
     budget = 30 if args.quick else 180
 
     # Load data
-    table = pq.read_table(DATA_FILE)
+    data_file = resolve_eth_data_file()
+    print(f"  使用数据文件: {data_file}")
+    table = pq.read_table(data_file)
     df = table.to_pandas()
     for c in ["open", "high", "low", "close", "volume"]:
         if c in df.columns:

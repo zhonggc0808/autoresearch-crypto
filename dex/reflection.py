@@ -20,7 +20,7 @@ import os
 import random
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 import numpy as np
 
@@ -160,21 +160,6 @@ class ReflectionEngine:
         self.hypotheses: List[Hypothesis] = list(HYPOTHESIS_TEMPLATES)
         self.meta_reflections: List[str] = []
         self.blind_spots: List[str] = []
-
-    def inject_hypotheses(self, hypotheses: List[Hypothesis]) -> None:
-        """Inject externally generated hypotheses into the engine.
-
-        New hypotheses are appended to the front of the queue so they
-        will be tested before any remaining template hypotheses.
-
-        Args:
-            hypotheses: List of Hypothesis objects to inject.
-        """
-        if not hypotheses:
-            return
-        # Insert at front so they get tested first
-        for h in reversed(hypotheses):
-            self.hypotheses.insert(0, h)
 
     # ------------------------------------------------------------------
     # Logging
@@ -540,7 +525,7 @@ def gepa_evolve(
 # GEPA V2 — with edge guards, mandatory reflection, and never-stop loop
 # ---------------------------------------------------------------------------
 
-from dex.scoring import (  # noqa: E402 — lazy import avoids circular dependency
+from dex.scoring import (
     EdgeFlag,
     detect_dead_agent,
     pick_revival_action,
@@ -557,8 +542,6 @@ def gepa_evolve_v2(
     max_dd: float = 0.30,
     dead_threshold: int = 5,
     verbose: bool = True,
-    llm_generator: Any = None,  # Optional LLMHypothesisGenerator
-    on_revive: Optional[Callable[[str, Dict[str, Any]], Tuple[Callable, Any]]] = None,
 ) -> ReflectionEngine:
     """GEPA V2: risk-adjusted scoring + edge guards + never-stop revival.
 
@@ -571,9 +554,6 @@ def gepa_evolve_v2(
         max_dd: Maximum acceptable drawdown before RISKY flag.
         dead_threshold: Rounds of no improvement before DEAD flag.
         verbose: Print progress.
-        on_revive: Optional callback when data-switching revival fires.
-            Called as ``on_revive(action, action_params)`` and must return
-            ``(new_evaluate_fn, new_df)`` or ``(None, None)`` if unsupported.
     """
     if verbose:
         print("=" * 60)
@@ -583,117 +563,6 @@ def gepa_evolve_v2(
             f"MaxDD={max_dd * 100:.0f}%  |  DeadThreshold={dead_threshold}"
         )
         print("=" * 60)
-
-    # ------------------------------------------------------------------
-    # Strategy switch map — default params for each strategy type.
-    # When switch_strategy_type revival fires, the agent picks a strategy
-    # it hasn't used before (or one at random from the pool).
-    # ------------------------------------------------------------------
-    _STRATEGY_POOL: Dict[str, Dict[str, Any]] = {
-        "TrendStrategy": {
-            "style": "趋势跟踪",
-            "params": {
-                "window": 15, "std_dev": 2.5, "atr_multiplier": 2.0,
-                "max_hold_bars": 36, "rsi_threshold": 35, "entry_zone": 0.3,
-                "use_adx": True, "adx_threshold": 20,
-            },
-        },
-        "PureActionStrategy": {
-            "style": "均值回归",
-            "params": {
-                "window": 20, "std_dev": 2.0, "atr_period": 14,
-                "atr_multiplier": 2.5, "max_hold_bars": 24,
-                "entry_zone": 0.0, "enable_short": True,
-            },
-        },
-        "GridStrategy": {
-            "style": "网格交易",
-            "params": {
-                "grid_spacing_pct": 0.008, "grid_levels": 5,
-                "base_size": 0.1, "atr_period": 14,
-                "atr_spacing_mult": 0.5, "max_position": 1.0,
-                "trend_ma_period": 100,
-            },
-        },
-        "HybridMeanRevMomentumStrategy": {
-            "style": "事件驱动",
-            "params": {
-                "rsi_period": 5, "rsi_low": 28, "rsi_high": 72,
-                "ma_period": 25, "atr_period": 12, "atr_multiplier": 3.5,
-                "max_hold_bars": 24, "enable_short": True,
-            },
-        },
-        "ScalpStrategy": {
-            "style": "超短线",
-            "params": {
-                "window": 10, "std_dev": 1.5, "atr_period": 8,
-                "atr_multiplier": 1.5, "max_hold_bars": 8,
-                "take_profit_pct": 0.015, "stop_loss_pct": 0.010,
-            },
-        },
-        "AdaptiveHybridStrategy": {
-            "style": "自适应混合",
-            "params": {
-                "trend_long_ma": 50, "trend_pull_ma": 20,
-                "rsi_period": 14, "rsi_low": 30, "rsi_high": 70,
-                "atr_period": 14, "atr_multiplier": 2.0,
-                "max_hold_bars": 30, "enable_short": True,
-            },
-        },
-        "HybridStrategy": {
-            "style": "混合策略",
-            "params": {
-                "window": 15, "std_dev": 2.0, "ma_period": 25,
-                "rsi_period": 14, "rsi_low": 30, "rsi_high": 70,
-                "atr_period": 14, "atr_multiplier": 2.5,
-                "max_hold_bars": 24, "enable_short": True,
-            },
-        },
-        "TrendFollowStrategy": {
-            "style": "趋势追随",
-            "params": {
-                "ma_period": 50, "atr_period": 14,
-                "atr_multiplier": 3.0, "max_hold_bars": 48,
-                "rsi_threshold": 40, "use_adx": True, "adx_threshold": 25,
-            },
-        },
-    }
-
-    def _apply_strategy_switch(agent: Any, current_name: str) -> str:
-        """Switch agent to a different strategy type.
-
-        Picks a strategy the agent hasn't used before; falls back to
-        random selection if all have been tried.
-
-        Returns the name of the selected strategy.
-        """
-        available = [n for n in _STRATEGY_POOL if n != current_name]
-        if not available:
-            available = list(_STRATEGY_POOL.keys())
-        picked = available[state["revival_count"] % len(available)]
-        defaults = _STRATEGY_POOL[picked]
-        agent.params = dict(defaults["params"])
-        agent.style = defaults["style"]
-        # Import strategy class lazily
-        from dex.strategies import __getattr__ as _get_cls
-        try:
-            agent.strategy_cls = _get_cls(picked)
-        except Exception:
-            pass  # Keep old class if import fails
-        return picked
-
-    # Track which strategy each agent is using (for switch decisions)
-    _agent_strategy: Dict[str, str] = {}
-    for a in agents:
-        cls_name = a.strategy_cls.__name__ if hasattr(a.strategy_cls, "__name__") else "TrendStrategy"
-        _agent_strategy[a.name] = cls_name
-
-    # Discrete parameters that must stay integers during mutation
-    _DISCRETE = frozenset({
-        "window", "atr_period", "max_hold_bars", "rsi_threshold",
-        "adx_threshold", "grid_levels", "trend_ma_period",
-        "rsi_period", "rsi_low", "rsi_high", "ma_period",
-    })
 
     agent_states: Dict[str, dict] = {
         a.name: {
@@ -719,116 +588,27 @@ def gepa_evolve_v2(
             print(f"  Agent: {agent.name} ({agent.style})")
             print(f"  假设: {hypothesis.text}")
 
-        # --- Edge guard: multi-condition revival check ---
-        # Three independent triggers, any one can fire revival:
-        #   1. DEAD: score plateau for dead_threshold rounds (e.g. 5)
-        #   2. STALE: same reflection text for 3+ rounds → hypotheses exhausted
-        #   3. REJECT: 10+ consecutive rejections → stuck in local minimum
+        # --- Edge guard: dead agent check ---
         is_dead = detect_dead_agent(state["score_history"], dead_threshold)
-        is_stale = state["reflection_repeats"] >= 3
-        is_stuck = state["consecutive_rejections"] >= 10
-
-        need_revival = (is_dead or is_stale or is_stuck) and state["revival_count"] < 3
-
-        if need_revival:
+        if is_dead and state["revival_count"] < 3:
             action, action_params = pick_revival_action(agent.name, state["revival_count"])
             state["revival_count"] += 1
-            trigger = "DEAD" if is_dead else ("STALE" if is_stale else "STUCK")
             if verbose:
-                print(f"  💤 {trigger} detected — revival action: {action}")
+                print(f"  💤 DEAD detected — revival action: {action}")
                 print(f"     params: {action_params}")
 
             if action == "widen_param_space":
                 scale = action_params.get("param_scale", 2.0)
                 for k in agent.params:
-                    if isinstance(agent.params[k], bool):
-                        continue
                     if isinstance(agent.params[k], (int, float)):
-                        new_val = agent.params[k] * (
+                        agent.params[k] = agent.params[k] * (
                             1 + np.random.uniform(-0.5, 0.5) * scale
                         )
-                        if k in _DISCRETE:
-                            agent.params[k] = max(1, int(round(new_val)))
-                        else:
-                            agent.params[k] = new_val
             elif action == "add_indicator":
                 pool = action_params.get("indicator_pool", ["use_adx"])
                 key = pool[state["revival_count"] % len(pool)]
                 if key in agent.params:
                     agent.params[key] = True
-            elif action == "remove_indicator":
-                pool = action_params.get("indicator_pool", ["use_adx"])
-                for key in pool:
-                    if key in agent.params and isinstance(agent.params[key], bool) and agent.params[key]:
-                        agent.params[key] = False
-                        break
-            elif action == "switch_strategy_type":
-                current = _agent_strategy.get(agent.name, "TrendStrategy")
-                picked = _apply_strategy_switch(agent, current)
-                _agent_strategy[agent.name] = picked
-                if verbose:
-                    print(f"     switched {agent.name} → {picked} ({agent.style})")
-            elif action == "switch_timeframe":
-                if on_revive is not None:
-                    new_fn, _ = on_revive(action, action_params)
-                    if new_fn is not None:
-                        evaluate_fn_raw = new_fn
-                        if verbose:
-                            print(f"     timeframe switched → {action_params.get('timeframes', 'unknown')}")
-                else:
-                    if verbose:
-                        print("     (timeframe switch skipped — no on_revive callback)")
-            elif action == "switch_symbol":
-                if on_revive is not None:
-                    new_fn, _ = on_revive(action, action_params)
-                    if new_fn is not None:
-                        evaluate_fn_raw = new_fn
-                        if verbose:
-                            print(f"     symbol switched → {action_params.get('symbols', 'unknown')}")
-                else:
-                    if verbose:
-                        print("     (symbol switch skipped — no on_revive callback)")
-
-            # Reset rejection counter after revival (fresh start)
-            state["consecutive_rejections"] = 0
-            state["reflection_repeats"] = 0  # Reset: new params → new reflections expected
-
-            # --- LLM-powered hypothesis injection on revival ---
-            # When an agent is revived, ask the LLM to generate fresh
-            # hypotheses tailored to the agent's new state — this is
-            # the "generate_alternative_hypotheses" step from program.md.
-            if llm_generator is not None and llm_generator.is_available:
-                try:
-                    from dex.llm_hypothesis import inject_llm_hypotheses
-                    # Build a focused context: just this agent and recent
-                    # experiments involving it
-                    agent_experiments = [
-                        e for e in engine.experiment_logs
-                        if e.agent == agent.name
-                    ][-5:]
-                    # Include the trigger and action in the prompt via
-                    # blind_spots — they shape the generated hypotheses
-                    revival_context = (
-                        f"[{trigger}] Agent {agent.name} ({agent.style}) "
-                        f"触发复活，动作: {action}，参数: {action_params}"
-                    )
-                    inject_llm_hypotheses(
-                        engine=engine,
-                        generator=llm_generator,
-                        experiments=agent_experiments if agent_experiments else engine.experiment_logs[-3:],
-                        agents=[{
-                            "name": agent.name,
-                            "style": agent.style,
-                            "params": dict(agent.params),
-                            "recent_score": state["score_history"][-1] if state["score_history"] else 0.0,
-                            "revival_count": state["revival_count"],
-                        }],
-                        blind_spots=engine.blind_spots[-2:] + [revival_context],
-                        n=3,
-                    )
-                except Exception as e:
-                    if verbose:
-                        print(f"  [LLM] 复活假设生成失败: {e}")
 
         # --- Run experiment ---
         log = engine.run_experiment(
@@ -865,27 +645,22 @@ def gepa_evolve_v2(
         log.edge_flags = edge_flags_str
 
         # --- Mandatory reflection enforcement ---
-        # Track reflection repetition independently — do NOT clear score_history
-        # (DEAD detection needs its own uninterrupted score history)
         if log.reflection == state["last_reflection"]:
             state["reflection_repeats"] += 1
-            if state["reflection_repeats"] == 3 and verbose:
-                print("  ⚠ 反思连续3轮重复 — 下次轮到该Agent时将触发STALE恢复")
+            if state["reflection_repeats"] >= 3:
+                if verbose:
+                    print("  ⚠ 连续3轮反思重复 — 标记为DEAD")
+                state["score_history"] = []  # Force dead detection next cycle
         else:
             state["reflection_repeats"] = 0
         state["last_reflection"] = log.reflection
 
         # Update params if improved
-        # Accept if raw score improved AND no RISKY flag (OVERFIT is informational only)
-        is_risky = EdgeFlag.RISKY in scored.flags
-        improved = log.score_after > log.score_before
-        if improved and not is_risky:
+        if scored.score > 0 and log.score_after > log.score_before:
             agent.params = log.params_after
             state["consecutive_rejections"] = 0
-            state["reflection_repeats"] = 0  # Reset: new params → new reflections expected
-            overfit_note = " [OVERFIT]" if EdgeFlag.OVERFIT in scored.flags else ""
             if verbose:
-                print(f"  ✓ 接受 (score {log.score_before:.3f}→{log.score_after:.3f}){overfit_note}")
+                print(f"  ✓ 接受 (score {log.score_before:.3f}→{log.score_after:.3f})")
                 print(
                     f"     risk-adj score={scored.score:.4f} "
                     f"sharpe_comp={scored.sharpe_component:.2f} "
@@ -916,42 +691,12 @@ def gepa_evolve_v2(
             if dead_count >= len(agents) * 0.75:
                 summary += (
                     f"\n\n  ⚠ 全部 {dead_count}/{len(agents)} Agent 枯竭！"
-                    f"\n  触发全局探索模式：扩大参数空间 + 切换策略类型"
+                    f"\n  触发全局探索模式：扩大参数空间 + 启用新指标"
                 )
                 for a in agents:
-                    # 50% chance: widen params; 50% chance: switch strategy
-                    if random.random() < 0.5:
-                        for k in a.params:
-                            if isinstance(a.params[k], bool):
-                                continue
-                            if isinstance(a.params[k], (int, float)):
-                                new_val = a.params[k] * (0.5 + np.random.random())
-                                if k in _DISCRETE:
-                                    a.params[k] = max(1, int(round(new_val)))
-                                else:
-                                    a.params[k] = new_val
-                    else:
-                        current = _agent_strategy.get(a.name, "TrendStrategy")
-                        picked = _apply_strategy_switch(a, current)
-                        _agent_strategy[a.name] = picked
-                        if verbose:
-                            print(f"     {a.name} → {picked}")
-
-            # --- LLM hypothesis injection (after meta-reflection) ---
-            if llm_generator is not None and llm_generator.is_available:
-                try:
-                    from dex.llm_hypothesis import inject_llm_hypotheses
-                    inject_llm_hypotheses(
-                        engine=engine,
-                        generator=llm_generator,
-                        experiments=engine.experiment_logs,
-                        agents=agents,
-                        blind_spots=engine.blind_spots[-3:],
-                        n=4,
-                    )
-                except Exception as e:
-                    if verbose:
-                        print(f"  [LLM] 注入失败: {e}")
+                    for k in a.params:
+                        if isinstance(a.params[k], (int, float)):
+                            a.params[k] = a.params[k] * (0.5 + np.random.random())
 
             if verbose:
                 print(summary)
