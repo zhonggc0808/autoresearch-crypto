@@ -184,8 +184,37 @@ Balanced candidate 约 128 trades/year (~2.85 天/笔)，频率适中，不是�
 
 ## 10. 下一步
 
-1. **修复 DD contribution bug** — NEUTRAL/BEAR 细分
+1. **修复 DD contribution bug** — NEUTRAL/BEAR 细分 ✅ 已修复 (2026-06-13)
 2. **Rolling OOS 验证** — 6m/12m/18m 滑动窗口
 3. **Regime-balanced 验证** — BULL-heavy / BEAR-heavy / NEUTRAL-heavy 子区间
-4. **OKX signal-only 对接** — 用 `dex.regime_permissions` 统一 API
+4. **OKX signal-only 对接** — 用 `dex.regime_permissions` 统一 API ✅ 已完成 (2026-06-13)
 5. **Live 断点恢复** — startup catch-up + exchange reconciliation（如需无人值守）
+
+## 11. 实盘/Sandbox 运行记录 (2026-06-13)
+
+### OKX Demo
+
+| 项目 | 状态 |
+|------|------|
+| `live_okx_quant.py` v2.1 支持 | ✅ 已接入，自动检测 `strategy_type` |
+| `--signal-only` 模式 | ✅ 支持，已有 CLI 参数 |
+| v2 profile 共存 | ✅ `--strategy-profile channel_breakout_v2_1_balanced` 和 `channel_breakout_v2` 互不干扰 |
+| 启动脚本 | `scripts/run_okx_channel_breakout_v2_1_demo.ps1` |
+| 真实市场数据 | ✅ OKX demo 使用真实盘口（bid/ask 价差 ~0.01） |
+
+### Bitget Demo
+
+| 项目 | 状态 |
+|------|------|
+| `live_bitget_quant.py` v2.1 支持 | ✅ 已接入 |
+| `--signal-only` 模式 | ✅ 已新增 |
+| 启动脚本 | `start_bitget_demo_v21.bat` / `start_bitget_demo_v21_signal_only.bat` |
+| 注意 | Bitget PAPTRADING 是隔离沙箱，价格不与真实市场同步，仅用于验证策略逻辑流程 |
+
+### 已验证的功能
+
+- v2.1 checkpoint 加载 → 三套策略 + permission config 自动构建
+- 日线 EMA 指标计算 → 前一日已收盘 daily candle，无 lookahead
+- regime 判定 → BULL/BEAR/NEUTRAL 实时输出
+- permission 拦截 → allow_L/allow_S/force_flat/exit_only 正确生效
+- Maker 挂单 → 成交 → 信号变化撤单 流程正常
