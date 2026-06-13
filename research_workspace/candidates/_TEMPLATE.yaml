@@ -1,0 +1,57 @@
+# Candidate: <简短标题>
+# experiment_id: exp_NNNN (按目录中最新 ID +1)
+# parent_id: null (或上一个实验 ID)
+# strategy: channel_breakout (或其他已注册策略家族)
+# candidate_role: standalone (standalone | filter | overlay | ensemble_component)
+# description: <一句话描述假设>
+
+strategy: channel_breakout
+candidate_role: standalone
+description: "TODO: 描述这个实验的假设"
+
+# --- standalone 候选：填写 params ---
+params:
+  bull:
+    entry_lookback: 375
+    min_hold_bars: 432
+    enable_short: false
+    # extra_conditions:
+    #   - "连续3天close < EMA50 → 禁多"
+
+  bear:
+    entry_lookback: 375
+    min_hold_bars: 432
+    enable_short: true
+
+  neutral:
+    entry_lookback: 375
+    min_hold_bars: 432
+    enable_short: true
+    # directional_only: true
+
+execution:
+  safe_reversal: true
+  regime_filter:
+    fast_days: 50
+    slow_days: 200
+  dd_guard: null
+  # dd_guard:
+  #   max_dd: 0.25
+  #   recovery_dd: 0.15
+
+# --- filter / overlay / ensemble_component 额外字段 ---
+# 当 candidate_role != standalone 时，取消注释并填写以下字段：
+#
+# base_strategy: channel_breakout_v2_1_balanced
+#
+# filter:
+#   family: adaptive_hybrid
+#   action: block_entries_when_filter_flat
+#   # action 选项:
+#   #   block_entries_when_filter_flat  — 过滤器 flat 时禁止入场
+#   #   block_entries_when_filter_against — 过滤器方向相反时禁止入场
+#   #   scale_position_by_filter_confidence — 按过滤器信号强度缩放仓位
+#
+# evaluation:
+#   compare_to: v2_1_baseline
+#   combined_metrics_required: true
