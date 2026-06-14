@@ -265,6 +265,74 @@ def test_baseline_status():
     print(f"    warnings: {flags.get('warnings', [])}")
 
 
+def test_baseline_metric_regression():
+    """Verify v2.1 baseline OOS metrics stay within expected ranges.
+
+    These ranges are loose enough to accommodate minor data fluctuations
+    but tight enough to catch a warmup bug regression (like the previous
+    OOS-only regime computation issue).
+    """
+    ckpt_path = str(PROJECT_DIR / "checkpoints" / "channel_breakout_v2_1_balanced.pt")
+    result = research_oracle.run_oracle(checkpoint_path=ckpt_path)
+
+    oos_raw = result["metrics"]["oos"]["raw"]
+    oos_safe = result["metrics"]["oos"]["safe_execution"]
+
+    # OOS raw return: expected +140% ~ +170%
+    assert 1.40 <= oos_raw["return"] <= 1.70, (
+        f"OOS return out of range: {oos_raw['return']:.4f} "
+        f"(expected 1.40 ~ 1.70)"
+    )
+
+    # OOS DD: expected -30% ~ -38%
+    assert -0.38 <= oos_raw["dd"] <= -0.30, (
+        f"OOS DD out of range: {oos_raw['dd']:.4f} "
+        f"(expected -0.38 ~ -0.30)"
+    )
+
+    # OOS Sharpe: expected 2.1 ~ 2.6
+    assert 2.1 <= oos_raw["sharpe"] <= 2.6, (
+        f"OOS Sharpe out of range: {oos_raw['sharpe']:.4f} "
+        f"(expected 2.1 ~ 2.6)"
+    )
+
+    # OOS trades: expected 50 ~ 100
+    assert 50 <= oos_raw["trades"] <= 100, (
+        f"OOS trades out of range: {oos_raw['trades']} "
+        f"(expected 50 ~ 100)"
+    )
+
+    # Safe-execution should be close to raw
+    return_diff = abs(oos_safe["return"] - oos_raw["return"])
+    assert return_diff < 0.05, (
+        f"Safe vs raw return difference too large: {return_diff:.4f}"
+    )
+
+    # Execution parity
+    parity = result["metrics"]["execution_parity"]
+    assert parity >= 0.99, (
+        f"Execution parity dropped: {parity}"
+    )
+
+    # Oracle version must be present
+    assert result.get("oracle_version") == "v0.1.0", (
+        f"Unexpected oracle version: {result.get('oracle_version')}"
+    )
+
+    # Baseline metadata
+    assert result.get("baseline_id") == "channel_breakout_v2_1_balanced"
+    assert "split_id" in result
+    assert "checkpoint_hash" in result
+
+    print("  [PASS] Baseline metric regression check")
+    print(f"    OOS return: {oos_raw['return']:.4f}")
+    print(f"    OOS DD: {oos_raw['dd']:.4f}")
+    print(f"    OOS Sharpe: {oos_raw['sharpe']:.4f}")
+    print(f"    OOS trades: {oos_raw['trades']}")
+    print(f"    Exec parity: {parity:.4f}")
+    print(f"    Oracle version: {result.get('oracle_version')}")
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -284,6 +352,7 @@ if __name__ == "__main__":
         ("Sensible metrics", test_oracle_metrics_are_sensible),
         ("Rolling regime distribution valid", test_rolling_regime_distribution_valid),
         ("Baseline status (not REJECT)", test_baseline_status),
+        ("Baseline metric regression", test_baseline_metric_regression),
     ]
 
     failed = 0

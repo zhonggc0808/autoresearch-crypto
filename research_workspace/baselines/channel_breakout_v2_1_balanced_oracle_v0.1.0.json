@@ -1,0 +1,172 @@
+{
+  "experiment_id": "oracle_20260614_104729",
+  "parent_id": null,
+  "candidate_role": "standalone",
+  "timestamp": "2026-06-14T10:47:29Z",
+  "strategy": "channel_breakout_v21",
+  "params_hash": "sha256:c2877bc",
+  "data_hash": "sha256:92bf27aef3e8b521",
+  "commit": "956eb48",
+  "data": {
+    "dataset_path": "D:\\aiproject2\\autoresearch-crypto\\data\\crypto\\ETHUSDT_5m_1300d.parquet",
+    "data_hash": "sha256:92bf27aef3e8b521",
+    "data_start": "2022-11-20 01:20:00",
+    "data_end": "2026-06-12 01:15:00",
+    "is_start": "2022-11-20 01:20:00",
+    "is_end": "2025-05-18 01:35:00",
+    "oos_start": "2025-05-18 01:40:00",
+    "oos_end": "2026-06-12 01:15:00",
+    "is_bars": 262068,
+    "oos_bars": 112316,
+    "split_method": "fixed-split",
+    "split_ratio": 0.7
+  },
+  "metrics": {
+    "is": {
+      "raw": {
+        "return": 0.6717076168558709,
+        "dd": -0.5274249397219132,
+        "sharpe": 0.41965761223546627,
+        "win_rate": 0.37373737373737376,
+        "annual_return": 0.22889126774371849,
+        "annual_vol": 0.5454238433194191,
+        "trades": 99,
+        "trades_per_year": 39.7,
+        "score": 0.0,
+        "n_bars": 262068
+      },
+      "safe_execution": {
+        "return": 0.6371823947414874,
+        "dd": -0.5217277607479506,
+        "sharpe": 0.40145694150733113,
+        "win_rate": 0.36363636363636365,
+        "annual_return": 0.21864729824159324,
+        "annual_vol": 0.5446344941020292,
+        "trades": 99,
+        "trades_per_year": 39.7,
+        "score": 0.0,
+        "n_bars": 262068
+      },
+      "regime_permission": {
+        "return": 0.8201714548839387,
+        "dd": -0.5641737493492114,
+        "sharpe": 0.5299631270282773,
+        "win_rate": 0.38823529411764707,
+        "annual_return": 0.2715561263246744,
+        "annual_vol": 0.5124056985764313,
+        "trades": 85,
+        "trades_per_year": 34.1,
+        "score": 0.0,
+        "n_bars": 262068
+      }
+    },
+    "oos": {
+      "raw": {
+        "return": 1.5656533316989703,
+        "dd": -0.33849686025364945,
+        "sharpe": 2.3497491284811036,
+        "win_rate": 0.4714285714285714,
+        "annual_return": 1.4153550185936186,
+        "annual_vol": 0.6023430337469751,
+        "trades": 70,
+        "trades_per_year": 65.5,
+        "score": 0.0,
+        "n_bars": 112316
+      },
+      "safe_execution": {
+        "return": 1.5748327040639425,
+        "dd": -0.33849686025364956,
+        "sharpe": 2.3677518554968393,
+        "win_rate": 0.4714285714285714,
+        "annual_return": 1.4234420661207055,
+        "annual_vol": 0.6011787353544344,
+        "trades": 70,
+        "trades_per_year": 65.5,
+        "score": 0.0,
+        "n_bars": 112316
+      },
+      "regime_permission": {
+        "return": 1.1805744536441023,
+        "dd": -0.33849686025364945,
+        "sharpe": 1.8573275827134517,
+        "win_rate": 0.463768115942029,
+        "annual_return": 1.0743352168367264,
+        "annual_vol": 0.5784306585633013,
+        "trades": 69,
+        "trades_per_year": 64.6,
+        "score": 0.0,
+        "n_bars": 112316
+      }
+    },
+    "rolling": {
+      "6m_min_return": -0.2512,
+      "6m_min_sharpe": -1.0946,
+      "6m_worst_regime": {
+        "dominant": "NEUTRAL",
+        "bull_pct": 0.384,
+        "bear_pct": 0.0,
+        "neutral_pct": 0.616
+      },
+      "6m_worst_bar": 25920,
+      "6m_worst_time": "2023-02-18 01:15:00",
+      "12m_min_return": -0.1301,
+      "12m_min_sharpe": -0.2123,
+      "12m_worst_regime": {
+        "dominant": "BEAR",
+        "bull_pct": 0.405,
+        "bear_pct": 0.47,
+        "neutral_pct": 0.125
+      },
+      "12m_worst_bar": 155520,
+      "12m_worst_time": "2024-05-13 02:35:00"
+    },
+    "regime": {
+      "bull": {
+        "return": 0.1863,
+        "trades": 16,
+        "bars": 150048
+      },
+      "bear": {
+        "return": 2.8226,
+        "trades": 126,
+        "bars": 121840
+      },
+      "neutral": {
+        "return": 0.1013,
+        "trades": 32,
+        "bars": 102496
+      }
+    },
+    "execution_parity": 0.9989,
+    "sensitivity": {
+      "fees": {
+        "0bp": 0.7237,
+        "2bp": 0.6717,
+        "4bp": 0.6213,
+        "10bp": 0.479
+      },
+      "slippage": {
+        "0bp": 0.7394,
+        "2bp": 0.6717,
+        "5bp": 0.5751
+      }
+    }
+  },
+  "flags": {
+    "status": "BASELINE",
+    "warnings": [
+      "DD_OVER_40",
+      "CORR_BASELINE_099"
+    ],
+    "disqualifications": [],
+    "baseline_known_risks": [
+      "IS_DD_OVER_50",
+      "ROLLING_NEGATIVE_IN_WINDOW"
+    ]
+  },
+  "checkpoint_path": "checkpoints/channel_breakout_v2_1_balanced.pt",
+  "oracle_version": "v0.1.0",
+  "baseline_id": "channel_breakout_v2_1_balanced",
+  "split_id": "ETHUSDT_5m_1300d_70_30_full_warmup",
+  "checkpoint_hash": "sha256:c2877bc"
+}

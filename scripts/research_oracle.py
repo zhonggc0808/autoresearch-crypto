@@ -84,6 +84,12 @@ OUTPUT_DIR = PROJECT_DIR / "research_workspace"
 REPORT_PATH = OUTPUT_DIR / "oracle_report.json"
 TSV_PATH = OUTPUT_DIR / "results.tsv"
 JSONL_PATH = OUTPUT_DIR / "experiments.jsonl"
+BASELINE_DIR = OUTPUT_DIR / "baselines"
+
+# Oracle version — increment when evaluation logic changes
+ORACLE_VERSION = "v0.1.0"
+BASELINE_ID = "channel_breakout_v2_1_balanced"
+SPLIT_ID = f"{SYMBOL}_{INTERVAL}_1300d_{int(SPLIT_RATIO*100)}_{int((1-SPLIT_RATIO)*100)}_full_warmup"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -112,6 +118,10 @@ def _now_iso() -> str:
 
 def _ensure_output_dir() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _ensure_baseline_dir() -> None:
+    BASELINE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _safe_first_datetime(df: pd.DataFrame) -> str:
@@ -304,6 +314,7 @@ def _compute_rolling_metrics(
     prices: np.ndarray,
     window_months: List[int],
     regimes: Optional[np.ndarray] = None,
+    df: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
     """Compute minimum metrics across rolling windows.
 
@@ -361,11 +372,17 @@ def _compute_rolling_metrics(
                     }
                 worst_time = start  # bar index
 
+        # Convert worst bar index to date string
+        worst_time_date = None
+        if worst_time is not None and df is not None and worst_time < len(df):
+            dt_val = _safe_first_datetime(df.iloc[max(0, worst_time - 1):worst_time + 1])
+            worst_time_date = dt_val if dt_val != "unknown" else str(worst_time)
+
         result[f"{key}_min_return"] = round(float(worst_return), 4)
         result[f"{key}_min_sharpe"] = round(float(worst_sharpe), 4)
         result[f"{key}_worst_regime"] = worst_regime
-        # Convert bar index to approximate date string if df was passed
         result[f"{key}_worst_bar"] = worst_time
+        result[f"{key}_worst_time"] = worst_time_date
 
     return result
 
@@ -601,7 +618,8 @@ def run_oracle(
 
     # --- Rolling metrics (full data, pre-computed regimes) ---
     rolling = _compute_rolling_metrics(
-        signals_raw_full, prices_full, ROLLING_WINDOW_MONTHS, regimes=regimes_full
+        signals_raw_full, prices_full, ROLLING_WINDOW_MONTHS,
+        regimes=regimes_full, df=df_full,
     )
 
     # --- Regime breakdown (pre-computed regimes) ---
@@ -673,7 +691,30 @@ def run_oracle(
         "flags": flags,
         "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
     }
+    # --- Add version fields to the result ---
+    result["oracle_version"] = ORACLE_VERSION
+    result["baseline_id"] = BASELINE_ID
+    result["split_id"] = SPLIT_ID
+    result["checkpoint_hash"] = checkpoint_hash
+
     return result
+
+
+def _save_baseline_snapshot(result: Dict[str, Any], checkpoint_path: str) -> None:
+    """Save an immutable baseline snapshot to research_workspace/baselines/.
+
+    The snapshot is named with oracle version so it is never overwritten
+    by future oracle versions. This preserves the exact comparison anchor
+    for all candidates.
+    """
+    _ensure_baseline_dir()
+    snapshot_name = f"{BASELINE_ID}_oracle_{ORACLE_VERSION}.json"
+    snapshot_path = BASELINE_DIR / snapshot_name
+    if snapshot_path.exists():
+        print(f"  baseline snapshot exists (not overwritten): {snapshot_name}")
+        return
+    snapshot_path.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+    print(f"  baseline snapshot saved: {snapshot_path}")
 
 
 def _get_git_commit() -> Optional[str]:
@@ -817,12 +858,9 @@ def main():
     print(f"--- Rolling ---")
     for k, v in m["rolling"].items():
         if "worst_bar" in k:
-            # Convert bar index to date
-            bar_idx = v
-            if bar_idx is not None and bar_idx < len(df_full):
-                dt = df_full.iloc[bar_idx].get("datetime", "?")
-                window_label = k.replace("_worst_bar", "")
-                print(f"  {window_label}_worst_time: {dt}")
+            continue  # skip raw bar index, show date instead
+        elif "worst_time" in k:
+            print(f"  {k}: {v}")
         elif "worst_regime" in k:
             print(f"  {k}: {v}")
         else:
@@ -845,6 +883,10 @@ def main():
     print()
     print(f"  Execution parity: {m['execution_parity']}")
     print(f"  Elapsed: {elapsed:.1f}s")
+    print(f"  Oracle version: {ORACLE_VERSION}")
+    baseline_id = result.get("baseline_id", result.get("strategy", "unknown"))
+    print(f"  Baseline: {baseline_id}")
+    print(f"  Split: {result.get('split_id', 'unknown')}")
 
     # --- Write output ---
     if not args.no_write:
@@ -852,6 +894,9 @@ def main():
         _write_oracle_report(result)
         _append_results_tsv(result)
         _append_experiments_jsonl(result)
+        # Save baseline snapshot if evaluating v2.1 baseline
+        if result.get("strategy") == "channel_breakout_v21" and args.checkpoint:
+            _save_baseline_snapshot(result, args.checkpoint)
     else:
         print("\n  (--no-write: skipping output files)")
 
