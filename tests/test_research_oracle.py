@@ -83,7 +83,9 @@ def test_oracle_runs_on_v21_baseline():
     flags = result["flags"]
     for key in ["status", "warnings", "disqualifications"]:
         assert key in flags, f"Missing flags key: {key}"
-    assert flags["status"] in ("PASS", "WARN", "REJECT"), f"Invalid status: {flags['status']}"
+    assert flags["status"] in ("PASS", "WARN", "REJECT", "BASELINE"), (
+        f"Invalid status: {flags['status']}"
+    )
 
     # rolling
     rolling = metrics["rolling"]
@@ -198,6 +200,71 @@ def test_oracle_metrics_are_sensible():
     print(f"    Exec parity: {parity:.4f}")
 
 
+def test_rolling_regime_distribution_valid():
+    """Verify rolling window regime attribution is not all-NEUTRAL.
+
+    Before the warmup fix, 6-month rolling windows would show 100% NEUTRAL
+    because EMA200 couldn't warm up in a 180-day window.
+    """
+    ckpt_path = str(PROJECT_DIR / "checkpoints" / "channel_breakout_v2_1_balanced.pt")
+    result = research_oracle.run_oracle(checkpoint_path=ckpt_path)
+
+    rolling = result["metrics"]["rolling"]
+
+    # 6m worst regime must have meaningful distribution
+    regime_6m = rolling.get("6m_worst_regime")
+    assert regime_6m is not None, "6m worst regime missing from rolling metrics"
+
+    # At least one regime should be > 50% and not all three near 33%
+    # (which would indicate uniform/random labeling)
+    pcts = [regime_6m.get("bull_pct", 0), regime_6m.get("bear_pct", 0), regime_6m.get("neutral_pct", 0)]
+    max_pct = max(pcts)
+
+    assert max_pct > 0.5, (
+        f"Rolling 6m worst window regime distribution too uniform: "
+        f"BULL={pcts[0]:.1%} BEAR={pcts[1]:.1%} NEUTRAL={pcts[2]:.1%}. "
+        f"EMA200 warmup may still be broken."
+    )
+
+    # 12m worst regime should also have valid distribution
+    regime_12m = rolling.get("12m_worst_regime")
+    assert regime_12m is not None, "12m worst regime missing"
+
+    pcts_12 = [regime_12m.get("bull_pct", 0), regime_12m.get("bear_pct", 0), regime_12m.get("neutral_pct", 0)]
+    # 12-month windows should have at least some variety
+    num_nonzero = sum(1 for p in pcts_12 if p > 0.05)
+    assert num_nonzero >= 2, (
+        f"Rolling 12m worst window has only {num_nonzero} regimes > 5%: "
+        f"BULL={pcts_12[0]:.1%} BEAR={pcts_12[1]:.1%} NEUTRAL={pcts_12[2]:.1%}"
+    )
+
+    print("  [PASS] Rolling regime distribution valid")
+    print(f"    6m worst regime: {regime_6m['dominant']} "
+          f"(BULL={regime_6m['bull_pct']:.1%} BEAR={regime_6m['bear_pct']:.1%} NEUTRAL={regime_6m['neutral_pct']:.1%})")
+    print(f"    12m worst regime: {regime_12m['dominant']} "
+          f"(BULL={regime_12m['bull_pct']:.1%} BEAR={regime_12m['bear_pct']:.1%} NEUTRAL={regime_12m['neutral_pct']:.1%})")
+
+
+def test_baseline_status():
+    """Verify v2.1 baseline gets BASELINE status, not REJECT."""
+    ckpt_path = str(PROJECT_DIR / "checkpoints" / "channel_breakout_v2_1_balanced.pt")
+    result = research_oracle.run_oracle(checkpoint_path=ckpt_path)
+
+    flags = result["flags"]
+    assert flags["status"] == "BASELINE", (
+        f"v2.1 baseline should have BASELINE status, got {flags['status']}"
+    )
+    assert "baseline_known_risks" in flags, "baseline_known_risks field missing"
+    assert len(flags["disqualifications"]) == 0, (
+        f"Baseline should have no disqualifications, got {flags['disqualifications']}"
+    )
+
+    print("  [PASS] Baseline status correct")
+    print(f"    status: {flags['status']}")
+    print(f"    known_risks: {flags.get('baseline_known_risks', [])}")
+    print(f"    warnings: {flags.get('warnings', [])}")
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -215,6 +282,8 @@ if __name__ == "__main__":
         ("No live files accessed", test_no_live_files_accessed),
         ("Output files created", test_output_files_created),
         ("Sensible metrics", test_oracle_metrics_are_sensible),
+        ("Rolling regime distribution valid", test_rolling_regime_distribution_valid),
+        ("Baseline status (not REJECT)", test_baseline_status),
     ]
 
     failed = 0

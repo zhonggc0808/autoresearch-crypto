@@ -303,20 +303,31 @@ def _compute_rolling_metrics(
     signals: np.ndarray,
     prices: np.ndarray,
     window_months: List[int],
+    regimes: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
-    """Compute minimum metrics across rolling windows."""
+    """Compute minimum metrics across rolling windows.
+
+    Uses pre-computed regimes (from full data) and slices them alongside
+    signals/prices. This avoids EMA warmup issues when the rolling window
+    is shorter than the EMA slow period (200 days).
+    """
     result = {}
     for months in window_months:
         window_bars = months * BARS_PER_MONTH
+        key = f"{months}m"
         if window_bars >= len(signals) // 2:
-            # Window too large relative to data
-            result[f"{months}m_min_return"] = None
-            result[f"{months}m_min_sharpe"] = None
+            result[f"{key}_min_return"] = None
+            result[f"{key}_min_sharpe"] = None
+            result[f"{key}_worst_regime"] = None
+            result[f"{key}_worst_time"] = None
             continue
 
-        step = window_bars // 2  # 50% overlap
-        returns = []
-        sharpes = []
+        step = window_bars // 2
+        worst_return = float("inf")
+        worst_sharpe = float("inf")
+        worst_regime = None
+        worst_time = None
+        all_returns = []
 
         for start in range(0, len(signals) - window_bars, step):
             end = start + window_bars
@@ -324,15 +335,37 @@ def _compute_rolling_metrics(
             win_prices = prices[start:end]
             ev = StrategyEvaluator(commission=COMMISSION, slippage=SLIPPAGE)
             _, metrics, _ = ev.evaluate(win_signals, win_prices)
-            returns.append(metrics.get("total_return", 0))
-            sharpes.append(metrics.get("sharpe_ratio", 0))
+            ret = metrics.get("total_return", 0)
+            sh = metrics.get("sharpe_ratio", 0)
+            all_returns.append(ret)
 
-        if returns:
-            result[f"{months}m_min_return"] = round(float(np.min(returns)), 4)
-            result[f"{months}m_min_sharpe"] = round(float(np.min(sharpes)), 4)
-        else:
-            result[f"{months}m_min_return"] = None
-            result[f"{months}m_min_sharpe"] = None
+            if ret < worst_return:
+                worst_return = ret
+                worst_sharpe = sh
+                # Regime attribution from pre-computed labels (sliced, not recomputed)
+                if regimes is not None and len(regimes) > end:
+                    win_regimes = regimes[start:end]
+                    bull_pct = float((win_regimes == "BULL").mean())
+                    bear_pct = float((win_regimes == "BEAR").mean())
+                    neutral_pct = float((win_regimes == "NEUTRAL").mean())
+                    # Determine dominant regime for this worst window
+                    dom = max(
+                        [("BULL", bull_pct), ("BEAR", bear_pct), ("NEUTRAL", neutral_pct)],
+                        key=lambda x: x[1],
+                    )
+                    worst_regime = {
+                        "dominant": dom[0],
+                        "bull_pct": round(bull_pct, 3),
+                        "bear_pct": round(bear_pct, 3),
+                        "neutral_pct": round(neutral_pct, 3),
+                    }
+                worst_time = start  # bar index
+
+        result[f"{key}_min_return"] = round(float(worst_return), 4)
+        result[f"{key}_min_sharpe"] = round(float(worst_sharpe), 4)
+        result[f"{key}_worst_regime"] = worst_regime
+        # Convert bar index to approximate date string if df was passed
+        result[f"{key}_worst_bar"] = worst_time
 
     return result
 
@@ -340,10 +373,9 @@ def _compute_rolling_metrics(
 def _compute_regime_breakdown(
     signals: np.ndarray,
     prices: np.ndarray,
-    df: pd.DataFrame,
+    regimes: np.ndarray,
 ) -> Dict[str, Any]:
-    """Compute per-regime metrics."""
-    regimes = build_daily_regime_labels(df, fast_days=50, slow_days=200)
+    """Compute per-regime metrics using pre-computed regime labels."""
     breakdown = {}
     for label in ["BULL", "BEAR", "NEUTRAL"]:
         mask = regimes == label
@@ -421,18 +453,38 @@ def _compute_flags(
     fee_sens: Dict[str, Any],
     execution_parity: float,
     corr_vs_v21: Optional[float],
+    is_baseline: bool = False,
 ) -> Dict[str, Any]:
-    """Apply disqualification rules and return flags dict."""
+    """Apply disqualification rules and return flags dict.
+
+    When ``is_baseline=True``, known risks (DD_OVER_50, ROLLING_NEGATIVE) are
+    recorded as ``baseline_known_risks`` instead of disqualifications — the
+    baseline cannot be disqualified by the oracle it anchors.
+    """
     disqualifications = []
     warnings = []
+    baseline_known_risks = []
 
     # Auto-reject gates
-    if is_metrics["dd"] < -0.50:
-        disqualifications.append("DD_OVER_50")
-    if rolling.get("6m_min_return") is not None and rolling["6m_min_return"] < 0:
-        disqualifications.append("ROLLING_NEGATIVE")
+    has_dd50 = is_metrics["dd"] < -0.50
+    has_rolling_neg = (
+        rolling.get("6m_min_return") is not None and rolling["6m_min_return"] < 0
+    )
 
-    # Warning gates
+    if is_baseline:
+        # Baseline: record risks without disqualifying
+        if has_dd50:
+            baseline_known_risks.append("IS_DD_OVER_50")
+        if has_rolling_neg:
+            baseline_known_risks.append("ROLLING_NEGATIVE_IN_WINDOW")
+    else:
+        # Candidates: auto-reject if worse than or equal to baseline in these dimensions
+        if has_dd50:
+            disqualifications.append("DD_OVER_50")
+        if has_rolling_neg:
+            disqualifications.append("ROLLING_NEGATIVE")
+
+    # Warning gates (apply to both baseline and candidates)
     if is_metrics["dd"] < -0.40:
         warnings.append("DD_OVER_40")
     if is_metrics["trades"] < 30:
@@ -446,12 +498,19 @@ def _compute_flags(
     if fee_sens.get("10bp", 0) < 0:
         warnings.append("FEE_FRAGILE")
 
-    status = "REJECT" if disqualifications else ("WARN" if warnings else "PASS")
-    return {
+    if is_baseline:
+        status = "BASELINE"
+    else:
+        status = "REJECT" if disqualifications else ("WARN" if warnings else "PASS")
+
+    result = {
         "status": status,
         "warnings": warnings,
         "disqualifications": disqualifications,
     }
+    if baseline_known_risks:
+        result["baseline_known_risks"] = baseline_known_risks
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -490,11 +549,12 @@ def run_oracle(
     data_path = _find_eth_data()
     data_hash = _file_hash(data_path)
     df_is, df_oos, split_idx = _load_and_split_data(data_path)
+    df_full = pd.concat([df_is, df_oos], ignore_index=True)
 
-    # --- Generate signals ---
+    # --- Generate signals on FULL data first (for regime pre-compute) ---
     if is_v21:
-        signals_raw_is = _generate_v21_signals(checkpoint, df_is)
-        signals_raw_oos = _generate_v21_signals(checkpoint, df_oos)
+        # Generate v2.1 signals on full data in one pass
+        signals_raw_full = _generate_v21_signals(checkpoint, df_full)
         strategy_family = "channel_breakout_v21"
     else:
         strategy = checkpoint.get("_strategy_instance")
@@ -503,23 +563,32 @@ def run_oracle(
             strategy = build_strategy_from_checkpoint(checkpoint)
         strategy_name = str(checkpoint.get("strategy", "unknown")).lower()
         strategy_family = strategy_name
-        signals_raw_is = _generate_raw_signals(strategy, df_is)
-        signals_raw_oos = _generate_raw_signals(strategy, df_oos)
+        signals_raw_full = _generate_raw_signals(strategy, df_full)
+
+    # Split signals for IS/OOS
+    signals_raw_is = signals_raw_full[:split_idx]
+    signals_raw_oos = signals_raw_full[split_idx:]
+
+    # --- Pre-compute regimes on FULL data (EMA50/200 warmup on df_full) ---
+    # This is live-compatible: at any bar t, EMA uses only bars ≤ t.
+    # Then slice for IS/OOS and rolling windows — no re-warmup needed.
+    regimes_full = build_daily_regime_labels(df_full, fast_days=50, slow_days=200)
+    regimes_is = regimes_full[:split_idx]
+    regimes_oos = regimes_full[split_idx:]
 
     # --- Signal variants ---
-    # Safe-execution (close-confirm-open)
-    signals_safe_is = _safe_execution_signals(signals_raw_is)
-    signals_safe_oos = _safe_execution_signals(signals_raw_oos)
+    signals_safe_full = _safe_execution_signals(signals_raw_full)
+    signals_safe_is = signals_safe_full[:split_idx]
+    signals_safe_oos = signals_safe_full[split_idx:]
 
-    # Regime-filtered (bear-only shorts)
-    regimes_is = build_daily_regime_labels(df_is, fast_days=50, slow_days=200)
-    regimes_oos = build_daily_regime_labels(df_oos, fast_days=50, slow_days=200)
+    # Regime-filtered (bear-only shorts) — using pre-computed regimes
     signals_regime_is, _ = apply_regime_short_filter(signals_raw_is, regimes_is, df_is)
     signals_regime_oos, _ = apply_regime_short_filter(signals_raw_oos, regimes_oos, df_oos)
 
     # --- Evaluate IS ---
     prices_is = df_is["close"].values.astype(float)
     prices_oos = df_oos["close"].values.astype(float)
+    prices_full = np.concatenate([prices_is, prices_oos])
 
     is_raw = _evaluate_signals(signals_raw_is, prices_is)
     is_safe = _evaluate_signals(signals_safe_is, prices_is)
@@ -530,14 +599,13 @@ def run_oracle(
     oos_safe = _evaluate_signals(signals_safe_oos, prices_oos)
     oos_regime = _evaluate_signals(signals_regime_oos, prices_oos)
 
-    # --- Rolling metrics (full data, raw signals) ---
-    prices_full = np.concatenate([prices_is, prices_oos])
-    signals_full = np.concatenate([signals_raw_is, signals_raw_oos])
-    df_full = pd.concat([df_is, df_oos], ignore_index=True)
-    rolling = _compute_rolling_metrics(signals_full, prices_full, ROLLING_WINDOW_MONTHS)
+    # --- Rolling metrics (full data, pre-computed regimes) ---
+    rolling = _compute_rolling_metrics(
+        signals_raw_full, prices_full, ROLLING_WINDOW_MONTHS, regimes=regimes_full
+    )
 
-    # --- Regime breakdown ---
-    regime_breakdown = _compute_regime_breakdown(signals_full, prices_full, df_full)
+    # --- Regime breakdown (pre-computed regimes) ---
+    regime_breakdown = _compute_regime_breakdown(signals_raw_full, prices_full, regimes_full)
 
     # --- Fee / slippage sensitivity ---
     fee_sens = _compute_fee_sensitivity(signals_raw_is, prices_is)
@@ -550,8 +618,11 @@ def run_oracle(
     # --- Execution parity ---
     execution_parity = _compute_execution_parity(signals_raw_oos, signals_safe_oos, prices_oos)
 
-    # --- Flags ---
-    flags = _compute_flags(is_raw, oos_raw, rolling, fee_sens, execution_parity, corr_vs_v21)
+    # --- Flags (baseline gets known_risks, not disqualifications) ---
+    flags = _compute_flags(
+        is_raw, oos_raw, rolling, fee_sens, execution_parity, corr_vs_v21,
+        is_baseline=is_v21,
+    )
 
     # --- Build result ---
     timestamp = _now_iso()
@@ -745,7 +816,17 @@ def main():
     print()
     print(f"--- Rolling ---")
     for k, v in m["rolling"].items():
-        print(f"  {k}: {v}")
+        if "worst_bar" in k:
+            # Convert bar index to date
+            bar_idx = v
+            if bar_idx is not None and bar_idx < len(df_full):
+                dt = df_full.iloc[bar_idx].get("datetime", "?")
+                window_label = k.replace("_worst_bar", "")
+                print(f"  {window_label}_worst_time: {dt}")
+        elif "worst_regime" in k:
+            print(f"  {k}: {v}")
+        else:
+            print(f"  {k}: {v}")
     print()
     print(f"--- Regime ---")
     for regime, data in m["regime"].items():
@@ -757,6 +838,8 @@ def main():
     print()
     print(f"--- Flags ---")
     print(f"  status: {f['status']}")
+    if "baseline_known_risks" in f:
+        print(f"  baseline_known_risks: {f['baseline_known_risks']}")
     print(f"  warnings: {f['warnings']}")
     print(f"  disqualifications: {f['disqualifications']}")
     print()
