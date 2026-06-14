@@ -1763,7 +1763,7 @@ def main():
                             if resp.get("code") == "0" and resp.get("data"):
                                 od = resp["data"][0]
                                 o_state = od.get("state", "")
-                                fill_sz = float(od.get("fillSz", 0) or 0)
+                                fill_sz = okx_float(od.get("fillSz"))
                         except Exception:
                             o_state = None
                             fill_sz = 0.0
@@ -1827,6 +1827,46 @@ def main():
                         state["pending_close_reason"] = ""
                         state["pending_close_target"] = 0
                         state["pending_close_created_at"] = ""
+
+                # ── pending_open 优先检查 ──────────────────────────────────
+                if state.get("pending_open") and state.get("pending_order_id"):
+                    pc_id = state["pending_order_id"]
+                    try:
+                        o_state, fill_sz, avg_px = get_order_status(trade_api, args.symbol, pc_id)
+                    except Exception:
+                        o_state = None
+                        fill_sz = 0
+                        avg_px = 0.0
+
+                    if o_state == "filled":
+                        p_sig = state.get("pending_open_signal", 2)
+                        pos_dir = 1 if p_sig == 2 else -1
+                        state["position"] = pos_dir
+                        state["strategy_size"] = (
+                            abs(fill_sz) if fill_sz != 0 else state.get("pending_open_size", 0)
+                        )
+                        state["entry_price"] = (
+                            avg_px if avg_px > 0 else state.get("pending_open_price", 0)
+                        )
+                        state["entry_bar"] = state.get("bar_count", 0) - 1
+                        state["pending_open"] = False
+                        state["pending_order_id"] = None
+                        log_message(
+                            f"[PENDING_OPEN_FILLED] 入场成功 {pos_dir:+d} "
+                            f"@{state['entry_price']:.2f} size={state['strategy_size']:.6f}"
+                        )
+                    elif o_state in ("live", "partially_filled"):
+                        log_message(f"[PENDING_OPEN] 挂单未成交，保持等待: order_status={o_state}")
+                        save_state(state)
+                        if args.once:
+                            break
+                        _sleep_until_next(interval_seconds)
+                        continue
+                    else:
+                        log_message(f"[PENDING_OPEN_CANCELED] 挂单取消/过期: state={o_state}")
+                        state["pending_open"] = False
+                        state["pending_order_id"] = None
+                        state["pending_open_signal"] = 0
 
                 # 1. 获取 K 线数据
                 if is_v21:

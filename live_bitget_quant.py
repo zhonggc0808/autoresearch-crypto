@@ -821,6 +821,11 @@ def execute_trade(
         state["last_signal"] = signal_id
         return state
 
+    # ── 检测方向翻转 (FLIP) ────────────────────────────────────────
+    is_flip = (position == 1 and target_pos == -1) or (position == -1 and target_pos == 1)
+    if is_flip:
+        log_message(f"[FLIP_START] {'多→空' if position == 1 else '空→多'} 平旧开新")
+
     # --- 平掉当前仓位 ---
     if (position == 1 and target_pos <= 0) or (position == -1 and target_pos >= 0):
         actual_position = get_position(exchange, symbol)
@@ -886,7 +891,10 @@ def execute_trade(
                 state["pending_close_reason"] = close_label
                 state["pending_close_target"] = target_pos
                 state["pending_close_created_at"] = datetime.now().isoformat()
-                log_message(f"[PENDING_CLOSE] 挂出平仓maker单等待成交, order_id={order_id}")
+                flip_tag = " [FLIP_CLOSE_SUBMITTED]" if is_flip else ""
+                log_message(
+                    f"[PENDING_CLOSE] 挂出平仓maker单等待成交, order_id={order_id}{flip_tag}"
+                )
                 state["trades"] = trades
                 state["last_signal"] = signal_id
                 state["last_update"] = datetime.now().isoformat()
@@ -950,8 +958,23 @@ def execute_trade(
             min_notional=MIN_ORDER_USDT,
         )
         open_label = "开多" if target_pos == 1 else "开空"
+
+        # 下单前打印 size 计算明细
+        raw_size = capital_per_trade / current_price if current_price > 0 else 0
+        log_message(
+            f"[{open_label}计算] raw_size={raw_size:.6f} "
+            f"lot_sz={lot_sz} min_notional={MIN_ORDER_USDT} "
+            f"capital={capital_per_trade:.2f} price={current_price:.2f} "
+            f"notional_est={raw_size * current_price:.2f}"
+        )
         if plan.action == "skip":
-            if plan.reason == "invalid_price":
+            if plan.reason == "zero_size":
+                log_message(
+                    f"[跳过{open_label}] 计算大小为0: "
+                    f"raw_size={raw_size:.6f} lot_sz={lot_sz} "
+                    f"capital={capital_per_trade:.2f} price={current_price:.2f}"
+                )
+            elif plan.reason == "invalid_price":
                 log_message(f"[跳过{open_label}] 价格无效")
             elif plan.reason == "notional_below_minimum":
                 log_message(
@@ -1012,8 +1035,10 @@ def execute_trade(
                 state["pending_open_signal"] = 2 if target_pos == 1 else 3
                 state["pending_open_price"] = current_price
                 state["pending_open_size"] = plan.size
+                state["pending_open_is_flip"] = is_flip
+                flip_tag = " [FLIP_OPEN_SUBMITTED]" if is_flip else ""
                 log_message(
-                    f"[{open_label}Maker] 挂单{plan.side} size={plan.size:.8f} price={plan.price:.2f} notional={plan.notional:.2f}"
+                    f"[{open_label}Maker] 挂单{plan.side} size={plan.size:.8f} price={plan.price:.2f} notional={plan.notional:.2f}{flip_tag}"
                 )
             else:
                 log_message(f"[{open_label}失败] 限价单被拒绝")
@@ -1051,7 +1076,22 @@ def manage_tp_order(exchange, symbol, tick_sz, lot_sz, strategy, state):
         return state
 
     # 计算止盈价格和方向
-    tp_pct = getattr(strategy, "take_profit_pct", 0.02)
+    # v2.1: strategy is None, 不挂默认 TP; 只有 checkpoint 明确配置才挂
+    if strategy is None:
+        tp_pct = 0.0
+    else:
+        tp_pct = getattr(strategy, "take_profit_pct", 0.0)
+    if tp_pct <= 0:
+        # TP <= 0 表示不挂 TP 单, 取消旧单后返回
+        if state.get("tp_order_id"):
+            try:
+                exchange.cancel_order(state["tp_order_id"], symbol)
+            except Exception:
+                pass
+            state["tp_order_id"] = None
+            state["tp_price"] = 0.0
+            state["tp_side"] = None
+        return state
     if pos == 1:
         tp_price = round_to_tick(entry_price * (1 + tp_pct), tick_sz)
         tp_side = "sell"
@@ -1515,6 +1555,7 @@ def reconcile_state_on_startup(exchange, symbol, state, args, lot_sz, is_signal_
         state_d["pending_open_signal"] = 0
         state_d["pending_open_price"] = 0.0
         state_d["pending_open_size"] = 0.0
+        state_d["pending_open_is_flip"] = False
         state_d["pending_close"] = False
         state_d["pending_close_order_id"] = None
         state_d["pending_close_reason"] = ""
@@ -1567,15 +1608,32 @@ def reconcile_state_on_startup(exchange, symbol, state, args, lot_sz, is_signal_
     if state_dir == actual_dir and state.get("entry_price", 0) > 0:
         log_message(f"[STARTUP_RECONCILE] 保留原有 entry_price: {state['entry_price']:.2f}")
     else:
+        # 优先从交易所持仓的 avgOpenPrice 获取入场价
+        fb = 0.0
         try:
-            ticker = exchange.fetch_ticker(symbol)
-            fb = float(ticker.get("last", 0.0))
+            positions = exchange.fetch_positions([symbol])
+            for p in positions:
+                if p.get("symbol") == symbol:
+                    ep = float(p.get("entryPrice", 0) or 0)
+                    if ep > 0:
+                        fb = ep
+                        log_message(f"[STARTUP_RECONCILE] 从持仓接口获取 entry_price: {fb:.2f}")
+                        break
         except Exception:
-            fb = 0.0
+            pass
+        if fb <= 0:
+            try:
+                ticker = exchange.fetch_ticker(symbol)
+                fb = float(ticker.get("last", 0.0))
+            except Exception:
+                fb = 0.0
+            if fb > 0:
+                log_message(
+                    f"[STARTUP_RECONCILE] 持仓 avgOpenPrice 不可用，回退到 ticker: {fb:.2f}"
+                )
         if fb > 0:
             state["entry_price"] = fb
             reconciled = True
-            log_message(f"[STARTUP_RECONCILE] entry_price fallback -> 当前 ticker: {fb:.2f}")
         else:
             state["entry_price"] = 0.0
             log_message("[STARTUP_RECONCILE] 无法获取 entry_price，设为 0")
@@ -1745,6 +1803,7 @@ def main():
             "pending_open_signal": 0,
             "pending_open_price": 0.0,
             "pending_open_size": 0.0,
+            "pending_open_is_flip": False,
             # v2.1 fields
             "v21_regime": "",
             "v21_permission_reason": "",
@@ -1780,6 +1839,7 @@ def main():
         state.setdefault("pending_open_signal", 0)
         state.setdefault("pending_open_price", 0.0)
         state.setdefault("pending_open_size", 0.0)
+        state.setdefault("pending_open_is_flip", False)
         state.setdefault("ccxt_symbol", symbol)
         # v2.1 fields
         state.setdefault("v21_regime", "")
@@ -1911,9 +1971,11 @@ def main():
 
                     if abs(actual_pos) < lot_sz * 0.5:
                         # 平仓已完成（交易所持仓归零）
+                        pc_target = state.get("pending_close_target", 0)
+                        flip_tag = " [FLIP_CLOSE_FILLED]" if pc_target in (1, -1) else ""
                         log_message(
                             f"[PENDING_CLOSE_FILLED] 持仓已归零, 清除 pending_close "
-                            f"(order_id={pc_order_id})"
+                            f"(order_id={pc_order_id}){flip_tag}"
                         )
                         state["position"] = 0
                         state["strategy_size"] = 0.0
@@ -2006,6 +2068,54 @@ def main():
                         state["pending_close_reason"] = ""
                         state["pending_close_target"] = 0
                         state["pending_close_created_at"] = ""
+
+                # ── pending_open 优先检查 ──────────────────────────────────
+                # 在获取新 K 线和生成信号前，先确认上一轮的挂单状态
+                if state.get("pending_open") and state.get("pending_order_id"):
+                    pc_id = state["pending_order_id"]
+                    try:
+                        o_state, fill_sz, avg_px = get_order_status(exchange, symbol, pc_id)
+                    except Exception:
+                        o_state = None
+                        fill_sz = 0
+                        avg_px = 0.0
+
+                    if o_state == "filled":
+                        # 挂单已成交 → 更新 state
+                        p_sig = state.get("pending_open_signal", 2)
+                        pos_dir = 1 if p_sig == 2 else -1
+                        state["position"] = pos_dir
+                        state["strategy_size"] = (
+                            abs(fill_sz) if fill_sz != 0 else state.get("pending_open_size", 0)
+                        )
+                        state["entry_price"] = (
+                            avg_px if avg_px > 0 else state.get("pending_open_price", 0)
+                        )
+                        state["entry_bar"] = state.get("bar_count", 0) - 1
+                        state["pending_open"] = False
+                        state["pending_order_id"] = None
+                        # 用显式 flip 字段判断（提交开仓时已记录 is_flip）
+                        was_flip = state.get("pending_open_is_flip", False)
+                        flip_tag = " [FLIP_OPEN_FILLED]" if was_flip else ""
+                        state["pending_open_is_flip"] = False
+                        log_message(
+                            f"[PENDING_OPEN_FILLED] 入场成功 {pos_dir:+d} "
+                            f"@{state['entry_price']:.2f} size={state['strategy_size']:.6f}{flip_tag}"
+                        )
+                    elif o_state in ("live", "partially_filled"):
+                        log_message(f"[PENDING_OPEN] 挂单未成交，保持等待: order_status={o_state}")
+                        # 本轮跳过后续逻辑，等待下一轮
+                        save_state(state)
+                        if args.once:
+                            break
+                        _sleep_until_next(interval_seconds)
+                        continue
+                    else:
+                        # canceled / expired / rejected
+                        log_message(f"[PENDING_OPEN_CANCELED] 挂单取消/过期: state={o_state}")
+                        state["pending_open"] = False
+                        state["pending_order_id"] = None
+                        state["pending_open_signal"] = 0
 
                 # 1. 获取 K 线数据
                 if is_v21:

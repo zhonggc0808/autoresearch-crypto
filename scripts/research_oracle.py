@@ -5,11 +5,10 @@ Phase 2 minimal implementation. Read-only: never modifies checkpoints, live
 code, or data. Outputs structured metrics for human and LLM consumption.
 
 Usage:
-    # Evaluate v2.1 frozen baseline
-    uv run python scripts/research_oracle.py \\
-        --checkpoint checkpoints/channel_breakout_v2_1_balanced.pt
+    # Evaluate v2.1 frozen baseline (from committed YAML params)
+    uv run python scripts/research_oracle.py --baseline
 
-    # Evaluate a standard checkpoint
+    # Evaluate a checkpoint
     uv run python scripts/research_oracle.py \\
         --checkpoint checkpoints/eth_optimal.pt
 
@@ -53,7 +52,6 @@ from dex.config import (
     SLIPPAGE,
 )
 from dex.data import list_crypto_files, load_crypto_data
-from dex.drawdown_guard import apply_drawdown_guard
 from dex.indicators import compute_adx
 from dex.regime_filter import (
     apply_regime_short_filter,
@@ -71,7 +69,7 @@ from dex.strategies.channel_breakout import ChannelBreakoutTrendStrategy
 from dex.strategy_signals import generate_strategy_signals
 
 # ---------------------------------------------------------------------------
-# Fixed oracle configuration (Phase 2)
+# Fixed oracle configuration (Phase 2 freeze — v0.1.0)
 # ---------------------------------------------------------------------------
 SYMBOL = "ETHUSDT"
 INTERVAL = "5m"
@@ -89,6 +87,7 @@ BASELINE_DIR = OUTPUT_DIR / "baselines"
 # Oracle version — increment when evaluation logic changes
 ORACLE_VERSION = "v0.1.0"
 BASELINE_ID = "channel_breakout_v2_1_balanced"
+FROZEN_BASELINE_PARAMS = BASELINE_DIR / f"{BASELINE_ID}_params.json"
 SPLIT_ID = f"{SYMBOL}_{INTERVAL}_1300d_{int(SPLIT_RATIO*100)}_{int((1-SPLIT_RATIO)*100)}_full_warmup"
 
 # ---------------------------------------------------------------------------
@@ -130,7 +129,6 @@ def _safe_first_datetime(df: pd.DataFrame) -> str:
         if col in df.columns:
             val = df[col].iloc[0]
             return str(pd.Timestamp(val))
-    # Try index
     if isinstance(df.index, pd.DatetimeIndex):
         return str(df.index[0])
     return "unknown"
@@ -148,14 +146,34 @@ def _safe_last_datetime(df: pd.DataFrame) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Baseline loading (from frozen YAML params, not .pt)
+# ---------------------------------------------------------------------------
+
+def _load_baseline_params() -> Dict[str, Any]:
+    """Load frozen baseline params from committed YAML.
+
+    The YAML is checked into git (unlike .pt checkpoints which are gitignored).
+    This ensures oracle is reproducible on a fresh clone.
+    """
+    if not FROZEN_BASELINE_PARAMS.exists():
+        raise FileNotFoundError(
+            f"Frozen baseline params not found: {FROZEN_BASELINE_PARAMS}\n"
+            f"Run: uv run python scripts/research_oracle.py --checkpoint "
+            f"checkpoints/channel_breakout_v2_1_balanced.pt"
+        )
+    with open(FROZEN_BASELINE_PARAMS, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+# ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
 
 def _find_eth_data() -> Path:
-    """Find the ETHUSDT 5m data file, preferring 1300d (v2.1 eval period).
+    """Find the ETHUSDT 5m 1300d data file (v0.1.0 freeze: fail fast).
 
-    Scans the data directory directly (not via list_crypto_files which
-    deduplicates to only the longest file per symbol/interval).
+    Scans the data directory directly. In freeze mode (v0.1.0), only 1300d
+    is accepted — no fallback to shorter data.
     """
     from dex.config import DATA_DIR
     data_dir = Path(DATA_DIR)
@@ -173,19 +191,22 @@ def _find_eth_data() -> Path:
             "Run: uv run python prepare_crypto.py --symbol ETHUSDT --interval 5m --days 1300"
             % data_dir
         )
-    # Priority: 1300d > 730d > 365d > any non-2600d > largest
-    for tag in ["1300d", "730d", "365d"]:
-        for pf in eth_5m:
-            if tag in pf.name:
-                return pf
-    non_2600 = [p for p in eth_5m if "2600d" not in p.name]
-    if non_2600:
-        return max(non_2600, key=lambda p: p.stat().st_size)
-    return max(eth_5m, key=lambda p: p.stat().st_size)
+    # v0.1.0 freeze: MUST be 1300d. No fallback.
+    for pf in eth_5m:
+        if "1300d" in pf.name:
+            return pf
+    available = ", ".join(p.name for p in eth_5m)
+    raise FileNotFoundError(
+        "ETHUSDT_5m_1300d.parquet not found in %s. "
+        "Required for oracle v0.1.0 freeze. "
+        "Available files: %s. "
+        "Run: uv run python prepare_crypto.py --symbol ETHUSDT --interval 5m --days 1300"
+        % (data_dir, available)
+    )
 
 
 def _load_and_split_data(data_path: Path) -> Tuple[pd.DataFrame, pd.DataFrame, int]:
-    """Load data and split into IS/OOS at fix ed ratio."""
+    """Load data and split into IS/OOS at fixed ratio."""
     df = (
         load_crypto_data(str(data_path))
         .sort_values("timestamp")
@@ -286,12 +307,11 @@ def _evaluate_signals(
         slippage=slippage,
     )
     score, metrics, trade_log = ev.evaluate(signals, prices)
-    equity, trades = ev.simulate(signals, prices)
 
     n_bars = len(signals)
     years = n_bars / BARS_PER_YEAR if n_bars > 0 else 0.01
 
-    trade_pnls = [t for t in trades if t.get("pnl") is not None]
+    trade_pnls = [t for t in trade_log if t.get("pnl") is not None]
     n_trades = len(trade_pnls)
     tpy = n_trades / years if years > 0 else 0
 
@@ -338,7 +358,6 @@ def _compute_rolling_metrics(
         worst_sharpe = float("inf")
         worst_regime = None
         worst_time = None
-        all_returns = []
 
         for start in range(0, len(signals) - window_bars, step):
             end = start + window_bars
@@ -348,7 +367,6 @@ def _compute_rolling_metrics(
             _, metrics, _ = ev.evaluate(win_signals, win_prices)
             ret = metrics.get("total_return", 0)
             sh = metrics.get("sharpe_ratio", 0)
-            all_returns.append(ret)
 
             if ret < worst_return:
                 worst_return = ret
@@ -359,7 +377,6 @@ def _compute_rolling_metrics(
                     bull_pct = float((win_regimes == "BULL").mean())
                     bear_pct = float((win_regimes == "BEAR").mean())
                     neutral_pct = float((win_regimes == "NEUTRAL").mean())
-                    # Determine dominant regime for this worst window
                     dom = max(
                         [("BULL", bull_pct), ("BEAR", bear_pct), ("NEUTRAL", neutral_pct)],
                         key=lambda x: x[1],
@@ -392,7 +409,13 @@ def _compute_regime_breakdown(
     prices: np.ndarray,
     regimes: np.ndarray,
 ) -> Dict[str, Any]:
-    """Compute per-regime metrics using pre-computed regime labels."""
+    """Compute per-regime metrics using pre-computed regime labels.
+
+    NOTE: Regime PnL attribution is signal-isolated, not PnL-attributed. A
+    position opened in BULL and held into NEUTRAL will have its NEUTRAL-period
+    PnL reported under BULL. This is a documented approximation — use regime
+    returns for directional comparison, not for precise decomposition.
+    """
     breakdown = {}
     for label in ["BULL", "BEAR", "NEUTRAL"]:
         mask = regimes == label
@@ -459,6 +482,24 @@ def _compute_execution_parity(
     return round(float(0.0 if np.isnan(corr) else corr), 4)
 
 
+def _compute_equity_correlation(
+    signals_a: np.ndarray,
+    signals_b: np.ndarray,
+    prices: np.ndarray,
+) -> float:
+    """Correlation of equity curves between two signal sets."""
+    ev = StrategyEvaluator(commission=COMMISSION, slippage=SLIPPAGE)
+    eq_a, _ = ev.simulate(signals_a, prices)
+    eq_b, _ = ev.simulate(signals_b, prices)
+    min_len = min(len(eq_a), len(eq_b))
+    if min_len < 2:
+        return 0.0
+    ret_a = np.diff(eq_a[:min_len]) / (eq_a[:min_len - 1] + 1e-12)
+    ret_b = np.diff(eq_b[:min_len]) / (eq_b[:min_len - 1] + 1e-12)
+    corr = np.corrcoef(ret_a, ret_b)[0, 1]
+    return round(float(0.0 if np.isnan(corr) else corr), 4)
+
+
 # ---------------------------------------------------------------------------
 # Disqualification flags
 # ---------------------------------------------------------------------------
@@ -468,8 +509,9 @@ def _compute_flags(
     oos_metrics: Dict[str, Any],
     rolling: Dict[str, Any],
     fee_sens: Dict[str, Any],
+    fee_sens_oos: Dict[str, Any],
     execution_parity: float,
-    corr_vs_v21: Optional[float],
+    correlation: Optional[Dict[str, Any]],
     is_baseline: bool = False,
 ) -> Dict[str, Any]:
     """Apply disqualification rules and return flags dict.
@@ -495,7 +537,6 @@ def _compute_flags(
         if has_rolling_neg:
             baseline_known_risks.append("ROLLING_NEGATIVE_IN_WINDOW")
     else:
-        # Candidates: auto-reject if worse than or equal to baseline in these dimensions
         if has_dd50:
             disqualifications.append("DD_OVER_50")
         if has_rolling_neg:
@@ -510,9 +551,12 @@ def _compute_flags(
         warnings.append("OOS_DEGRADE")
     if execution_parity < 0.85:
         warnings.append("EXEC_PARITY_LOW")
-    if corr_vs_v21 is not None and corr_vs_v21 > 0.99:
+    if correlation is not None and correlation.get("vs_baseline", 0) >= 0.99:
         warnings.append("CORR_BASELINE_099")
-    if fee_sens.get("10bp", 0) < 0:
+    # FEE_FRAGILE: check OOS first, then IS
+    oos_10bp = fee_sens_oos.get("10bp", 0)
+    is_10bp = fee_sens.get("10bp", 0)
+    if oos_10bp < 0 or is_10bp < 0:
         warnings.append("FEE_FRAGILE")
 
     if is_baseline:
@@ -547,20 +591,39 @@ def _is_v21_checkpoint(checkpoint: Dict[str, Any]) -> bool:
 def run_oracle(
     checkpoint_path: Optional[str] = None,
     candidate_path: Optional[str] = None,
+    use_baseline: bool = False,
 ) -> Dict[str, Any]:
     """Run the full oracle evaluation and return structured results.
 
     This is the main entry point — it is pure logic with no side effects
     except for writing output files.
     """
-    if checkpoint_path:
+    if use_baseline:
+        # Load from frozen YAML params (committed to git)
+        checkpoint = _load_baseline_params()
+        is_v21 = True
+        checkpoint_hash = _checkpoint_hash(checkpoint)
+        _is_frozen_baseline = True
+    elif checkpoint_path:
         checkpoint = load_checkpoint(checkpoint_path)
         is_v21 = _is_v21_checkpoint(checkpoint)
-        checkpoint_hash = _checkpoint_hash(checkpoint)
+        # Hash of the raw .pt file for tracking
+        checkpoint_hash = _file_hash(Path(checkpoint_path))
+        # Compare frozen baseline using only param keys (strip eval artifacts)
+        if is_v21 and FROZEN_BASELINE_PARAMS.exists():
+            param_keys = {"strategy_type", "version", "variant",
+                          "regime_change_policy", "regime_filter",
+                          "bull", "bear", "neutral"}
+            ckpt_params = {k: v for k, v in checkpoint.items() if k in param_keys}
+            baseline_params = _load_baseline_params()
+            # Both should be dicts with same keys after filtering
+            _is_frozen_baseline = _checkpoint_hash(ckpt_params) == _checkpoint_hash(baseline_params)
+        else:
+            _is_frozen_baseline = False
     elif candidate_path:
         raise NotImplementedError("Candidate YAML evaluation is Phase 3+")
     else:
-        raise ValueError("Either --checkpoint or --candidate is required")
+        raise ValueError("Either --checkpoint, --baseline, or --candidate is required")
 
     # --- Load data ---
     data_path = _find_eth_data()
@@ -570,7 +633,6 @@ def run_oracle(
 
     # --- Generate signals on FULL data first (for regime pre-compute) ---
     if is_v21:
-        # Generate v2.1 signals on full data in one pass
         signals_raw_full = _generate_v21_signals(checkpoint, df_full)
         strategy_family = "channel_breakout_v21"
     else:
@@ -587,8 +649,6 @@ def run_oracle(
     signals_raw_oos = signals_raw_full[split_idx:]
 
     # --- Pre-compute regimes on FULL data (EMA50/200 warmup on df_full) ---
-    # This is live-compatible: at any bar t, EMA uses only bars ≤ t.
-    # Then slice for IS/OOS and rolling windows — no re-warmup needed.
     regimes_full = build_daily_regime_labels(df_full, fast_days=50, slow_days=200)
     regimes_is = regimes_full[:split_idx]
     regimes_oos = regimes_full[split_idx:]
@@ -598,7 +658,6 @@ def run_oracle(
     signals_safe_is = signals_safe_full[:split_idx]
     signals_safe_oos = signals_safe_full[split_idx:]
 
-    # Regime-filtered (bear-only shorts) — using pre-computed regimes
     signals_regime_is, _ = apply_regime_short_filter(signals_raw_is, regimes_is, df_is)
     signals_regime_oos, _ = apply_regime_short_filter(signals_raw_oos, regimes_oos, df_oos)
 
@@ -625,21 +684,39 @@ def run_oracle(
     # --- Regime breakdown (pre-computed regimes) ---
     regime_breakdown = _compute_regime_breakdown(signals_raw_full, prices_full, regimes_full)
 
-    # --- Fee / slippage sensitivity ---
+    # --- Fee / slippage sensitivity (IS + OOS) ---
     fee_sens = _compute_fee_sensitivity(signals_raw_is, prices_is)
+    fee_sens_oos = _compute_fee_sensitivity(signals_raw_oos, prices_oos)
     slippage_sens = _compute_slippage_sensitivity(signals_raw_is, prices_is)
+    slippage_sens_oos = _compute_slippage_sensitivity(signals_raw_oos, prices_oos)
 
     # --- vs Baseline correlation ---
-    # If evaluating baseline itself, correlation is 1.0
-    corr_vs_v21 = 1.0 if is_v21 else None
+    # If evaluating baseline itself, compute same-vs-same for documentation
+    if _is_frozen_baseline:
+        corr_vs_v21 = 1.0
+    else:
+        # Compare against baseline signals on same data
+        if FROZEN_BASELINE_PARAMS.exists():
+            baseline_ckpt = _load_baseline_params()
+            baseline_signals = _generate_v21_signals(baseline_ckpt, df_full)
+            corr_vs_v21 = _compute_equity_correlation(
+                signals_raw_full, baseline_signals, prices_full
+            )
+        else:
+            corr_vs_v21 = None
+
+    correlation = {
+        "vs_baseline": corr_vs_v21,
+        "method": "equity_return_corr",
+    }
 
     # --- Execution parity ---
     execution_parity = _compute_execution_parity(signals_raw_oos, signals_safe_oos, prices_oos)
 
     # --- Flags (baseline gets known_risks, not disqualifications) ---
     flags = _compute_flags(
-        is_raw, oos_raw, rolling, fee_sens, execution_parity, corr_vs_v21,
-        is_baseline=is_v21,
+        is_raw, oos_raw, rolling, fee_sens, fee_sens_oos, execution_parity, correlation,
+        is_baseline=_is_frozen_baseline,
     )
 
     # --- Build result ---
@@ -647,7 +724,9 @@ def run_oracle(
     commit = _get_git_commit()
 
     result = {
-        "experiment_id": f"oracle_{timestamp.replace(':', '').replace('-', '').replace('T', '_').replace('Z', '')}",
+        "experiment_id": (
+            f"oracle_{timestamp.replace(':', '').replace('-', '').replace('T', '_').replace('Z', '')}"
+        ),
         "parent_id": None,
         "candidate_role": "standalone",
         "timestamp": timestamp,
@@ -683,15 +762,22 @@ def run_oracle(
             "rolling": rolling,
             "regime": regime_breakdown,
             "execution_parity": execution_parity,
+            "correlation": correlation,
             "sensitivity": {
-                "fees": fee_sens,
-                "slippage": slippage_sens,
+                "is": {
+                    "fees": fee_sens,
+                    "slippage": slippage_sens,
+                },
+                "oos": {
+                    "fees": fee_sens_oos,
+                    "slippage": slippage_sens_oos,
+                },
             },
         },
         "flags": flags,
         "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
     }
-    # --- Add version fields to the result ---
+    # --- Add version fields ---
     result["oracle_version"] = ORACLE_VERSION
     result["baseline_id"] = BASELINE_ID
     result["split_id"] = SPLIT_ID
@@ -700,7 +786,7 @@ def run_oracle(
     return result
 
 
-def _save_baseline_snapshot(result: Dict[str, Any], checkpoint_path: str) -> None:
+def _save_baseline_snapshot(result: Dict[str, Any]) -> None:
     """Save an immutable baseline snapshot to research_workspace/baselines/.
 
     The snapshot is named with oracle version so it is never overwritten
@@ -765,6 +851,9 @@ def _append_results_tsv(result: Dict[str, Any]) -> None:
         rolling_12m = round(rolling_12m, 4)
 
     disqual = "|".join(f["disqualifications"]) if f["disqualifications"] else ""
+    corr_val = m.get("correlation", {}).get("vs_baseline", "N/A")
+    if corr_val is None:
+        corr_val = "N/A"
 
     row = (
         f"{result['timestamp']}\t{result['experiment_id']}\t{result['parent_id'] or 'null'}\t"
@@ -775,7 +864,7 @@ def _append_results_tsv(result: Dict[str, Any]) -> None:
         f"{oos_raw['return']:.4f}\t{rolling_12m}\t"
         f"N/A\tN/A\t"
         f"{is_raw['trades_per_year']}\t"
-        f"{result.get('corr_vs_v21') or 'N/A'}\t"
+        f"{corr_val}\t"
         f"{is_raw['score']:.4f}\t{f['status']}\t{disqual}\t"
         f"baseline_check\t"
         f"oracle run for {result['strategy']}\n"
@@ -793,10 +882,8 @@ def _append_results_tsv(result: Dict[str, Any]) -> None:
 def _append_experiments_jsonl(result: Dict[str, Any]) -> None:
     """Append full machine-readable record to experiments.jsonl."""
     _ensure_output_dir()
-    record = {k: v for k, v in result.items()}
-    # Convert any non-serializable types
     with open(JSONL_PATH, "a", encoding="utf-8", newline="") as fh:
-        fh.write(json.dumps(record, default=str) + "\n")
+        fh.write(json.dumps(result, default=str) + "\n")
     print(f"  experiments.jsonl: appended record ({JSONL_PATH})")
 
 
@@ -813,6 +900,10 @@ def main():
         help="Path to a .pt checkpoint file.",
     )
     parser.add_argument(
+        "--baseline", action="store_true",
+        help="Evaluate frozen baseline from committed YAML params.",
+    )
+    parser.add_argument(
         "--candidate", type=str, default=None,
         help="Path to a YAML candidate spec (Phase 3+).",
     )
@@ -822,14 +913,19 @@ def main():
     )
     args = parser.parse_args()
 
-    if not args.checkpoint and not args.candidate:
-        parser.error("Either --checkpoint or --candidate is required.")
+    # Require exactly one input mode
+    modes = sum([bool(args.checkpoint), args.baseline, bool(args.candidate)])
+    if modes != 1:
+        parser.error("Exactly one of --checkpoint, --baseline, or --candidate is required.")
 
-    print(f"=== Research Oracle (Phase 2) ===")
-    print(f"  Mode: {'checkpoint' if args.checkpoint else 'candidate'}")
-    if args.checkpoint:
+    print(f"=== Research Oracle (Phase 2 freeze {ORACLE_VERSION}) ===")
+    if args.baseline:
+        print(f"  Mode: baseline (frozen YAML params)")
+    elif args.checkpoint:
         print(f"  Checkpoint: {args.checkpoint}")
-    print(f"  Symbol: {SYMBOL} / {INTERVAL}")
+    elif args.candidate:
+        print(f"  Candidate: {args.candidate}")
+    print(f"  Symbol: {SYMBOL} / {INTERVAL} (1300d, v0.1.0 freeze)")
     print(f"  Split: {int(SPLIT_RATIO*100)}/{int((1-SPLIT_RATIO)*100)} IS/OOS")
     print()
 
@@ -837,6 +933,7 @@ def main():
     result = run_oracle(
         checkpoint_path=args.checkpoint,
         candidate_path=args.candidate,
+        use_baseline=args.baseline,
     )
     elapsed = time.time() - t0
 
@@ -858,21 +955,25 @@ def main():
     print(f"--- Rolling ---")
     for k, v in m["rolling"].items():
         if "worst_bar" in k:
-            continue  # skip raw bar index, show date instead
-        elif "worst_time" in k:
-            print(f"  {k}: {v}")
-        elif "worst_regime" in k:
+            continue
+        elif "worst_time" in k or "worst_regime" in k:
             print(f"  {k}: {v}")
         else:
             print(f"  {k}: {v}")
     print()
     print(f"--- Regime ---")
+    print(f"  (attribution: signal-isolated, not PnL-attributed)")
     for regime, data in m["regime"].items():
         print(f"  {regime}: return={data['return']}, trades={data['trades']}, bars={data['bars']}")
     print()
     print(f"--- Sensitivity ---")
-    print(f"  fees: {m['sensitivity']['fees']}")
-    print(f"  slippage: {m['sensitivity']['slippage']}")
+    print(f"  IS  fees={m['sensitivity']['is']['fees']}")
+    print(f"  OOS fees={m['sensitivity']['oos']['fees']}")
+    print(f"  IS  slippage={m['sensitivity']['is']['slippage']}")
+    print(f"  OOS slippage={m['sensitivity']['oos']['slippage']}")
+    print()
+    corr = m.get("correlation", {}).get("vs_baseline", "N/A")
+    print(f"  Correlation vs baseline: {corr}")
     print()
     print(f"--- Flags ---")
     print(f"  status: {f['status']}")
@@ -883,9 +984,8 @@ def main():
     print()
     print(f"  Execution parity: {m['execution_parity']}")
     print(f"  Elapsed: {elapsed:.1f}s")
-    print(f"  Oracle version: {ORACLE_VERSION}")
-    baseline_id = result.get("baseline_id", result.get("strategy", "unknown"))
-    print(f"  Baseline: {baseline_id}")
+    print(f"  Oracle version: {result.get('oracle_version')}")
+    print(f"  Baseline: {result.get('baseline_id', 'unknown')}")
     print(f"  Split: {result.get('split_id', 'unknown')}")
 
     # --- Write output ---
@@ -894,14 +994,14 @@ def main():
         _write_oracle_report(result)
         _append_results_tsv(result)
         _append_experiments_jsonl(result)
-        # Save baseline snapshot if evaluating v2.1 baseline
-        if result.get("strategy") == "channel_breakout_v21" and args.checkpoint:
-            _save_baseline_snapshot(result, args.checkpoint)
+        # Save baseline snapshot when running baseline
+        if args.baseline:
+            _save_baseline_snapshot(result)
     else:
         print("\n  (--no-write: skipping output files)")
 
     print("\nDone.")
-    return 0 if f["status"] != "REJECT" else 1
+    return 0 if f["status"] not in ("REJECT",) else 1
 
 
 if __name__ == "__main__":

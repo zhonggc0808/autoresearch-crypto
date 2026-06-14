@@ -5,7 +5,7 @@ Verifies:
   2. Output JSON has correct schema (all required top-level keys)
   3. No checkpoint files were modified
   4. No live_* files were accessed (checked via file mtime)
-  5. Output files are created at expected paths
+  5. Output files are correctly created and validated (temp paths)
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import tempfile
+import shutil
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -37,14 +38,38 @@ def _file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _with_temp_outputs(test_fn):
+    """Decorator to run test with temp output paths."""
+    def wrapper(*args, **kwargs):
+        tmp = Path(tempfile.mkdtemp())
+        orig_report = research_oracle.REPORT_PATH
+        orig_tsv = research_oracle.TSV_PATH
+        orig_jsonl = research_oracle.JSONL_PATH
+        research_oracle.REPORT_PATH = tmp / "oracle_report.json"
+        research_oracle.TSV_PATH = tmp / "results.tsv"
+        research_oracle.JSONL_PATH = tmp / "experiments.jsonl"
+        try:
+            test_fn(*args, **kwargs)
+        finally:
+            research_oracle.REPORT_PATH = orig_report
+            research_oracle.TSV_PATH = orig_tsv
+            research_oracle.JSONL_PATH = orig_jsonl
+            shutil.rmtree(tmp, ignore_errors=True)
+    return wrapper
+
+
+CKPT = str(PROJECT_DIR / "checkpoints" / "channel_breakout_v2_1_balanced.pt")
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
 def test_oracle_runs_on_v21_baseline():
     """Oracle runs on v2.1 balanced checkpoint and returns valid result."""
-    ckpt_path = str(PROJECT_DIR / "checkpoints" / "channel_breakout_v2_1_balanced.pt")
-    assert Path(ckpt_path).exists(), f"Checkpoint not found: {ckpt_path}"
+    result = research_oracle.run_oracle(checkpoint_path=CKPT)
 
-    result = research_oracle.run_oracle(checkpoint_path=ckpt_path)
-
-    # --- Schema validation ---
+    # Schema validation
     required_top_keys = [
         "experiment_id", "parent_id", "candidate_role", "timestamp",
         "strategy", "params_hash", "data_hash", "commit",
@@ -53,19 +78,16 @@ def test_oracle_runs_on_v21_baseline():
     for key in required_top_keys:
         assert key in result, f"Missing top-level key: {key}"
 
-    # data block
     data = result["data"]
     for key in ["dataset_path", "data_hash", "data_start", "data_end",
                 "is_start", "is_end", "oos_start", "oos_end",
                 "is_bars", "oos_bars", "split_method", "split_ratio"]:
         assert key in data, f"Missing data key: {key}"
 
-    # metrics block
     metrics = result["metrics"]
-    for key in ["is", "oos", "rolling", "regime", "execution_parity", "sensitivity"]:
+    for key in ["is", "oos", "rolling", "regime", "execution_parity", "correlation", "sensitivity"]:
         assert key in metrics, f"Missing metrics key: {key}"
 
-    # IS/OOS sub-blocks
     for block_name in ["is", "oos"]:
         block = metrics[block_name]
         for variant in ["raw", "safe_execution", "regime_permission"]:
@@ -74,12 +96,17 @@ def test_oracle_runs_on_v21_baseline():
             for field in ["return", "dd", "sharpe", "trades", "trades_per_year", "score"]:
                 assert field in v, f"Missing {block_name}.{variant}.{field}"
 
-    # sensitivity
+    # Sensitivity is now hierarchical: {is: {fees, slippage}, oos: {fees, slippage}}
     sens = metrics["sensitivity"]
-    assert "fees" in sens, "Missing sensitivity.fees"
-    assert "slippage" in sens, "Missing sensitivity.slippage"
+    for side in ["is", "oos"]:
+        assert side in sens, f"Missing sensitivity.{side}"
+        for mtype in ["fees", "slippage"]:
+            assert mtype in sens[side], f"Missing sensitivity.{side}.{mtype}"
 
-    # flags
+    # Correlation block
+    assert "correlation" in metrics, "Missing correlation"
+    assert "vs_baseline" in metrics["correlation"], "Missing correlation.vs_baseline"
+
     flags = result["flags"]
     for key in ["status", "warnings", "disqualifications"]:
         assert key in flags, f"Missing flags key: {key}"
@@ -87,109 +114,113 @@ def test_oracle_runs_on_v21_baseline():
         f"Invalid status: {flags['status']}"
     )
 
-    # rolling
     rolling = metrics["rolling"]
     assert "6m_min_return" in rolling, "Missing rolling 6m"
     assert "12m_min_return" in rolling, "Missing rolling 12m"
 
-    # regime
     regime = metrics["regime"]
     for r in ["bull", "bear", "neutral"]:
         assert r in regime, f"Missing regime.{r}"
 
-    # execution parity
     assert isinstance(metrics["execution_parity"], float), "execution_parity must be float"
 
     print("  [PASS] Schema validation")
-    return result
 
 
 def test_no_checkpoint_modified():
     """Verify no checkpoint was modified during oracle execution."""
-    ckpt_path = PROJECT_DIR / "checkpoints" / "channel_breakout_v2_1_balanced.pt"
-    hash_before = _file_sha256(ckpt_path)
+    ckpt = PROJECT_DIR / "checkpoints" / "channel_breakout_v2_1_balanced.pt"
+    hash_before = _file_sha256(ckpt)
 
-    research_oracle.run_oracle(checkpoint_path=str(ckpt_path))
+    research_oracle.run_oracle(checkpoint_path=str(ckpt))
 
-    hash_after = _file_sha256(ckpt_path)
-    assert hash_before == hash_after, (
-        f"Checkpoint modified! Hash before: {hash_before}, after: {hash_after}"
-    )
+    hash_after = _file_sha256(ckpt)
+    assert hash_before == hash_after, "Checkpoint modified!"
     print("  [PASS] Checkpoint not modified")
 
 
 def test_no_live_files_accessed():
     """Verify no live_* files were touched during oracle execution."""
-    # Record mtimes of live files before
     live_files = list(PROJECT_DIR.glob("live_*.py")) + list((PROJECT_DIR / "dex" / "live").glob("*.py"))
-    assert len(live_files) > 0, "No live files found — test may be misconfigured"
+    assert len(live_files) > 0, "No live files found"
 
     mtimes_before = {f: f.stat().st_mtime for f in live_files}
-
-    ckpt_path = str(PROJECT_DIR / "checkpoints" / "channel_breakout_v2_1_balanced.pt")
-    research_oracle.run_oracle(checkpoint_path=ckpt_path)
-
+    research_oracle.run_oracle(checkpoint_path=CKPT)
     mtimes_after = {f: f.stat().st_mtime for f in live_files}
+
     for f in live_files:
-        assert mtimes_before[f] == mtimes_after[f], (
-            f"Live file was modified: {f.name}"
-        )
+        assert mtimes_before[f] == mtimes_after[f], f"Live file modified: {f.name}"
     print("  [PASS] No live files modified")
 
 
 def test_output_files_created():
-    """Verify oracle writes output files."""
-    ckpt_path = str(PROJECT_DIR / "checkpoints" / "channel_breakout_v2_1_balanced.pt")
+    """Verify oracle writes correctly to temp paths (no false positive from stale files)."""
+    tmp = Path(tempfile.mkdtemp())
+    orig_report = research_oracle.REPORT_PATH
+    orig_tsv = research_oracle.TSV_PATH
+    orig_jsonl = research_oracle.JSONL_PATH
 
-    # Run oracle (it will write to default paths)
-    research_oracle.run_oracle(checkpoint_path=ckpt_path)
+    try:
+        report = tmp / "oracle_report.json"
+        tsv = tmp / "results.tsv"
+        jsonl = tmp / "experiments.jsonl"
 
-    report_path = research_oracle.REPORT_PATH
-    tsv_path = research_oracle.TSV_PATH
-    jsonl_path = research_oracle.JSONL_PATH
+        research_oracle.REPORT_PATH = report
+        research_oracle.TSV_PATH = tsv
+        research_oracle.JSONL_PATH = jsonl
 
-    assert report_path.exists(), f"Report not created: {report_path}"
-    assert tsv_path.exists(), f"TSV not created: {tsv_path}"
-    assert jsonl_path.exists(), f"JSONL not created: {jsonl_path}"
+        # Fresh temp dir — no files should exist yet
+        assert not report.exists(), "Temp report already exists (setup error)"
+        assert not tsv.exists(), "Temp TSV already exists (setup error)"
+        assert not jsonl.exists(), "Temp JSONL already exists (setup error)"
 
-    # Validate report is valid JSON
-    report = json.loads(report_path.read_text(encoding="utf-8"))
-    assert "experiment_id" in report, "Report missing experiment_id"
+        result = research_oracle.run_oracle(checkpoint_path=CKPT)
 
-    # Validate TSV has header + at least 1 row
-    tsv_lines = tsv_path.read_text(encoding="utf-8").strip().split("\n")
-    assert len(tsv_lines) >= 2, f"TSV has fewer than 2 lines: {len(tsv_lines)}"
-    assert "\t" in tsv_lines[0], "TSV header missing tabs"
+        # Now manually call writers (run_oracle returns result but doesn't write)
+        research_oracle._write_oracle_report(result)
+        research_oracle._append_results_tsv(result)
+        research_oracle._append_experiments_jsonl(result)
 
-    # Validate JSONL
-    jsonl_lines = jsonl_path.read_text(encoding="utf-8").strip().split("\n")
-    assert len(jsonl_lines) >= 1, "JSONL has no lines"
-    record = json.loads(jsonl_lines[-1])
-    assert "experiment_id" in record, "JSONL record missing experiment_id"
+        assert report.exists(), f"Report not created: {report}"
+        assert tsv.exists(), f"TSV not created: {tsv}"
+        assert jsonl.exists(), f"JSONL not created: {jsonl}"
 
-    print("  [PASS] Output files created + validated")
-    print(f"    report: {report_path} ({report_path.stat().st_size} bytes)")
-    print(f"    tsv: {tsv_path} ({tsv_path.stat().st_size} bytes)")
-    print(f"    jsonl: {jsonl_path} ({jsonl_path.stat().st_size} bytes)")
+        # Validate report JSON
+        report_data = json.loads(report.read_text(encoding="utf-8"))
+        assert "experiment_id" in report_data
+
+        # Validate TSV
+        tsv_lines = tsv.read_text(encoding="utf-8").strip().split("\n")
+        assert len(tsv_lines) >= 2, f"TSV has <2 lines: {len(tsv_lines)}"
+        assert "\t" in tsv_lines[0], "TSV header missing tabs"
+        assert len(tsv_lines[1].split("\t")) >= 20, "TSV row missing columns"
+
+        # Validate JSONL
+        jsonl_lines = jsonl.read_text(encoding="utf-8").strip().split("\n")
+        assert len(jsonl_lines) >= 1, "JSONL empty"
+        record = json.loads(jsonl_lines[-1])
+        assert "experiment_id" in record
+
+        print("  [PASS] Output files created + validated (temp paths)")
+        print(f"    report: {report} ({report.stat().st_size} bytes)")
+        print(f"    tsv: {tsv} ({tsv.stat().st_size} bytes)")
+        print(f"    jsonl: {jsonl} ({jsonl.stat().st_size} bytes)")
+    finally:
+        research_oracle.REPORT_PATH = orig_report
+        research_oracle.TSV_PATH = orig_tsv
+        research_oracle.JSONL_PATH = orig_jsonl
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_oracle_metrics_are_sensible():
     """Quick sanity check that metrics are in reasonable ranges."""
-    ckpt_path = str(PROJECT_DIR / "checkpoints" / "channel_breakout_v2_1_balanced.pt")
-    result = research_oracle.run_oracle(checkpoint_path=ckpt_path)
-
+    result = research_oracle.run_oracle(checkpoint_path=CKPT)
     is_raw = result["metrics"]["is"]["raw"]
 
-    # Return should be between -1 and +10 (1000%)
     assert -1.0 < is_raw["return"] < 10.0, f"IS return out of range: {is_raw['return']}"
-
-    # DD should be between -1.0 and 0
     assert -1.0 <= is_raw["dd"] <= 0.0, f"IS DD out of range: {is_raw['dd']}"
+    assert is_raw["trades"] > 0, "IS trades = 0"
 
-    # Trades should be > 0 for a real strategy
-    assert is_raw["trades"] > 0, "IS trades = 0 — something is wrong"
-
-    # Execution parity should be between 0 and 1
     parity = result["metrics"]["execution_parity"]
     assert 0.0 <= parity <= 1.0, f"Execution parity out of range: {parity}"
 
@@ -206,32 +237,23 @@ def test_rolling_regime_distribution_valid():
     Before the warmup fix, 6-month rolling windows would show 100% NEUTRAL
     because EMA200 couldn't warm up in a 180-day window.
     """
-    ckpt_path = str(PROJECT_DIR / "checkpoints" / "channel_breakout_v2_1_balanced.pt")
-    result = research_oracle.run_oracle(checkpoint_path=ckpt_path)
-
+    result = research_oracle.run_oracle(checkpoint_path=CKPT)
     rolling = result["metrics"]["rolling"]
 
-    # 6m worst regime must have meaningful distribution
     regime_6m = rolling.get("6m_worst_regime")
-    assert regime_6m is not None, "6m worst regime missing from rolling metrics"
+    assert regime_6m is not None, "6m worst regime missing"
 
-    # At least one regime should be > 50% and not all three near 33%
-    # (which would indicate uniform/random labeling)
     pcts = [regime_6m.get("bull_pct", 0), regime_6m.get("bear_pct", 0), regime_6m.get("neutral_pct", 0)]
     max_pct = max(pcts)
-
     assert max_pct > 0.5, (
         f"Rolling 6m worst window regime distribution too uniform: "
-        f"BULL={pcts[0]:.1%} BEAR={pcts[1]:.1%} NEUTRAL={pcts[2]:.1%}. "
-        f"EMA200 warmup may still be broken."
+        f"BULL={pcts[0]:.1%} BEAR={pcts[1]:.1%} NEUTRAL={pcts[2]:.1%}"
     )
 
-    # 12m worst regime should also have valid distribution
     regime_12m = rolling.get("12m_worst_regime")
     assert regime_12m is not None, "12m worst regime missing"
 
     pcts_12 = [regime_12m.get("bull_pct", 0), regime_12m.get("bear_pct", 0), regime_12m.get("neutral_pct", 0)]
-    # 12-month windows should have at least some variety
     num_nonzero = sum(1 for p in pcts_12 if p > 0.05)
     assert num_nonzero >= 2, (
         f"Rolling 12m worst window has only {num_nonzero} regimes > 5%: "
@@ -247,17 +269,12 @@ def test_rolling_regime_distribution_valid():
 
 def test_baseline_status():
     """Verify v2.1 baseline gets BASELINE status, not REJECT."""
-    ckpt_path = str(PROJECT_DIR / "checkpoints" / "channel_breakout_v2_1_balanced.pt")
-    result = research_oracle.run_oracle(checkpoint_path=ckpt_path)
+    result = research_oracle.run_oracle(checkpoint_path=CKPT)
 
     flags = result["flags"]
-    assert flags["status"] == "BASELINE", (
-        f"v2.1 baseline should have BASELINE status, got {flags['status']}"
-    )
-    assert "baseline_known_risks" in flags, "baseline_known_risks field missing"
-    assert len(flags["disqualifications"]) == 0, (
-        f"Baseline should have no disqualifications, got {flags['disqualifications']}"
-    )
+    assert flags["status"] == "BASELINE", f"Expected BASELINE, got {flags['status']}"
+    assert "baseline_known_risks" in flags
+    assert len(flags["disqualifications"]) == 0
 
     print("  [PASS] Baseline status correct")
     print(f"    status: {flags['status']}")
@@ -269,60 +286,37 @@ def test_baseline_metric_regression():
     """Verify v2.1 baseline OOS metrics stay within expected ranges.
 
     These ranges are loose enough to accommodate minor data fluctuations
-    but tight enough to catch a warmup bug regression (like the previous
-    OOS-only regime computation issue).
+    but tight enough to catch a warmup bug regression.
     """
-    ckpt_path = str(PROJECT_DIR / "checkpoints" / "channel_breakout_v2_1_balanced.pt")
-    result = research_oracle.run_oracle(checkpoint_path=ckpt_path)
+    result = research_oracle.run_oracle(checkpoint_path=CKPT)
 
     oos_raw = result["metrics"]["oos"]["raw"]
     oos_safe = result["metrics"]["oos"]["safe_execution"]
+    correlation = result["metrics"]["correlation"]
 
-    # OOS raw return: expected +140% ~ +170%
-    assert 1.40 <= oos_raw["return"] <= 1.70, (
-        f"OOS return out of range: {oos_raw['return']:.4f} "
-        f"(expected 1.40 ~ 1.70)"
-    )
+    assert 1.40 <= oos_raw["return"] <= 1.70, f"OOS return out of range: {oos_raw['return']:.4f}"
+    assert -0.38 <= oos_raw["dd"] <= -0.30, f"OOS DD out of range: {oos_raw['dd']:.4f}"
+    assert 2.1 <= oos_raw["sharpe"] <= 2.6, f"OOS Sharpe out of range: {oos_raw['sharpe']:.4f}"
+    assert 50 <= oos_raw["trades"] <= 100, f"OOS trades out of range: {oos_raw['trades']}"
 
-    # OOS DD: expected -30% ~ -38%
-    assert -0.38 <= oos_raw["dd"] <= -0.30, (
-        f"OOS DD out of range: {oos_raw['dd']:.4f} "
-        f"(expected -0.38 ~ -0.30)"
-    )
-
-    # OOS Sharpe: expected 2.1 ~ 2.6
-    assert 2.1 <= oos_raw["sharpe"] <= 2.6, (
-        f"OOS Sharpe out of range: {oos_raw['sharpe']:.4f} "
-        f"(expected 2.1 ~ 2.6)"
-    )
-
-    # OOS trades: expected 50 ~ 100
-    assert 50 <= oos_raw["trades"] <= 100, (
-        f"OOS trades out of range: {oos_raw['trades']} "
-        f"(expected 50 ~ 100)"
-    )
-
-    # Safe-execution should be close to raw
     return_diff = abs(oos_safe["return"] - oos_raw["return"])
-    assert return_diff < 0.05, (
-        f"Safe vs raw return difference too large: {return_diff:.4f}"
-    )
+    assert return_diff < 0.05, f"Safe vs raw return difference too large: {return_diff:.4f}"
 
-    # Execution parity
     parity = result["metrics"]["execution_parity"]
-    assert parity >= 0.99, (
-        f"Execution parity dropped: {parity}"
-    )
+    assert parity >= 0.99, f"Execution parity dropped: {parity}"
 
-    # Oracle version must be present
-    assert result.get("oracle_version") == "v0.1.0", (
-        f"Unexpected oracle version: {result.get('oracle_version')}"
-    )
+    # Correlation should be 1.0 (evaluating baseline)
+    assert correlation["vs_baseline"] == 1.0, f"vs_baseline correlation should be 1.0, got {correlation['vs_baseline']}"
 
-    # Baseline metadata
+    # Version metadata
+    assert result.get("oracle_version") == "v0.1.0", f"Unexpected version: {result.get('oracle_version')}"
     assert result.get("baseline_id") == "channel_breakout_v2_1_balanced"
     assert "split_id" in result
     assert "checkpoint_hash" in result
+
+    # Sensitivity should have IS + OOS
+    sens = result["metrics"]["sensitivity"]
+    assert "is" in sens and "oos" in sens, "Sensitivity missing IS/OOS split"
 
     print("  [PASS] Baseline metric regression check")
     print(f"    OOS return: {oos_raw['return']:.4f}")
@@ -330,6 +324,7 @@ def test_baseline_metric_regression():
     print(f"    OOS Sharpe: {oos_raw['sharpe']:.4f}")
     print(f"    OOS trades: {oos_raw['trades']}")
     print(f"    Exec parity: {parity:.4f}")
+    print(f"    Correlation vs baseline: {correlation['vs_baseline']}")
     print(f"    Oracle version: {result.get('oracle_version')}")
 
 
@@ -340,7 +335,6 @@ def test_baseline_metric_regression():
 if __name__ == "__main__":
     print("=== Research Oracle Smoke Tests ===\n")
 
-    # Record checkpoint hash before any test
     ckpt = PROJECT_DIR / "checkpoints" / "channel_breakout_v2_1_balanced.pt"
     hash_before_all = _file_sha256(ckpt)
 
@@ -348,7 +342,7 @@ if __name__ == "__main__":
         ("Schema validation", test_oracle_runs_on_v21_baseline),
         ("No checkpoint modification", test_no_checkpoint_modified),
         ("No live files accessed", test_no_live_files_accessed),
-        ("Output files created", test_output_files_created),
+        ("Output files created (temp paths)", test_output_files_created),
         ("Sensible metrics", test_oracle_metrics_are_sensible),
         ("Rolling regime distribution valid", test_rolling_regime_distribution_valid),
         ("Baseline status (not REJECT)", test_baseline_status),
@@ -365,10 +359,9 @@ if __name__ == "__main__":
             failed += 1
         print()
 
-    # Final checkpoint integrity check
     hash_after_all = _file_sha256(ckpt)
     if hash_before_all != hash_after_all:
-        print(f"  [FAIL] Checkpoint was modified during test suite!")
+        print("  [FAIL] Checkpoint was modified during test suite!")
         failed += 1
 
     print(f"---")
