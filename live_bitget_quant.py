@@ -58,6 +58,7 @@ from dex.live.common import (
     plan_entry_order,
     predict_signal,
     round_to_tick,
+    send_trade_notification,
 )
 from dex.regime_filter import build_daily_regime_labels
 from dex.regime_permissions import (
@@ -139,6 +140,23 @@ def log_message(msg):
     print(line)
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(line + "\n")
+
+
+def notify_trade_action(action, *, notify_email_to=None, mode=None, symbol=None, **details):
+    if not notify_email_to:
+        return False
+    payload = {
+        "exchange": "Bitget",
+        "mode": mode,
+        "symbol": symbol,
+        **details,
+    }
+    return send_trade_notification(
+        action,
+        payload,
+        to_addr=notify_email_to,
+        log_fn=log_message,
+    )
 
 
 def retry_on_exception(max_retries=3, delay=1.0, exceptions=(Exception,)):
@@ -825,6 +843,18 @@ def execute_trade(
     is_flip = (position == 1 and target_pos == -1) or (position == -1 and target_pos == 1)
     if is_flip:
         log_message(f"[FLIP_START] {'多→空' if position == 1 else '空→多'} 平旧开新")
+        _ne = state.get("notify_email_to")
+        _mn = state.get("mode_name")
+        if _ne:
+            notify_trade_action(
+                "FLIP_START",
+                notify_email_to=_ne,
+                mode=_mn,
+                symbol=symbol,
+                flip_direction="多→空" if position == 1 else "空→多",
+                entry_price=state.get("entry_price", 0),
+                current_price=current_price,
+            )
 
     # --- 平掉当前仓位 ---
     if (position == 1 and target_pos <= 0) or (position == -1 and target_pos >= 0):
@@ -1681,6 +1711,12 @@ def main():
         action="store_true",
         help="只输出信号和 permission 诊断信息，不下单（用于 v2.1 regime_permission checkpoint 观察）",
     )
+    parser.add_argument(
+        "--notify-email-to",
+        type=str,
+        default=None,
+        help="交易通知邮件地址（开仓/平仓/flip/异常时发送）",
+    )
     args = parser.parse_args()
 
     if not args.demo and not args.live:
@@ -1819,6 +1855,8 @@ def main():
             "pending_close_reason": "",
             "pending_close_target": 0,
             "pending_close_created_at": "",
+            "notify_email_to": None,
+            "mode_name": "",
         }
         log_message(
             f"初始化账户，保证金: {args.capital:.2f} USDT, 杠杆: {args.leverage}x, "
@@ -1855,6 +1893,8 @@ def main():
         state.setdefault("pending_close_reason", "")
         state.setdefault("pending_close_target", 0)
         state.setdefault("pending_close_created_at", "")
+        state.setdefault("notify_email_to", None)
+        state.setdefault("mode_name", "")
         if "strategy_btc" in state and "strategy_size" not in state:
             state["strategy_size"] = state.pop("strategy_btc")
         if "initial_equity" not in state:
@@ -1913,6 +1953,9 @@ def main():
             "pending_close_created_at": "",
         }
         log_message("已重置 state（空仓初始状态）")
+    # 注入通知配置到 state（供 execute_trade 等函数读取）
+    state["notify_email_to"] = args.notify_email_to
+    state["mode_name"] = mode_name
     save_state(state)
 
     try:
@@ -1988,6 +2031,14 @@ def main():
                         state["pending_close_reason"] = ""
                         state["pending_close_target"] = 0
                         state["pending_close_created_at"] = ""
+                        if state.get("notify_email_to"):
+                            notify_trade_action(
+                                "CLOSE_FILLED",
+                                notify_email_to=state["notify_email_to"],
+                                mode=state.get("mode_name"),
+                                symbol=symbol,
+                                reason=state.get("pending_close_reason", "close"),
+                            )
                         save_state(state)
                         if args.once:
                             break
@@ -2102,6 +2153,17 @@ def main():
                             f"[PENDING_OPEN_FILLED] 入场成功 {pos_dir:+d} "
                             f"@{state['entry_price']:.2f} size={state['strategy_size']:.6f}{flip_tag}"
                         )
+                        if state.get("notify_email_to"):
+                            action = "FLIP_OPEN_FILLED" if was_flip else "OPEN_FILLED"
+                            notify_trade_action(
+                                action,
+                                notify_email_to=state["notify_email_to"],
+                                mode=state.get("mode_name"),
+                                symbol=symbol,
+                                direction=pos_dir,
+                                price=state["entry_price"],
+                                size=state["strategy_size"],
+                            )
                     elif o_state in ("live", "partially_filled"):
                         log_message(f"[PENDING_OPEN] 挂单未成交，保持等待: order_status={o_state}")
                         # 本轮跳过后续逻辑，等待下一轮
@@ -2316,6 +2378,15 @@ def main():
                                 lot_sz,
                                 exit_reason,
                                 use_maker=is_timeout,
+                            )
+                        # 强制平仓通知
+                        if state.get("notify_email_to"):
+                            notify_trade_action(
+                                "FORCE_CLOSE",
+                                notify_email_to=state["notify_email_to"],
+                                mode=state.get("mode_name"),
+                                symbol=symbol,
+                                reason=exit_reason,
                             )
                     else:
                         # === 检查 pending_open 状态 ===
