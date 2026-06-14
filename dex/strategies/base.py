@@ -203,7 +203,9 @@ class StrategyEvaluator:
         elif position == -1:
             exec_price = prices[-1] * (1 + self.slippage)
             buy_cost = abs(shares) * exec_price * (1 + self.commission)
-            capital = capital + (entry_cost_basis - buy_cost)
+            pnl = entry_cost_basis - buy_cost
+            capital = capital + pnl
+            trades.append({"type": "buy_cover_final", "step": len(signals) - 1, "pnl": float(pnl)})
             equity[-1] = capital
 
         return np.array(equity), trades

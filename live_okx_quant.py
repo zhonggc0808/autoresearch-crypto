@@ -78,6 +78,8 @@ os.makedirs(LOG_DIR, exist_ok=True)
 STATE_FILE = os.path.join(LOG_DIR, "live_okx_state.json")
 LOG_FILE = os.path.join(LOG_DIR, "live_okx_log.txt")
 LOCK_FILE = os.path.join(LOG_DIR, "live_okx_quant.lock")
+CACHE_DIR = "data/live_cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
 
 OKX_STRATEGY_PROFILES = {
     "channel_breakout_v2": "checkpoints/channel_breakout_375_432.pt",
@@ -207,6 +209,18 @@ def align_next_wake_time(interval_seconds, offset_seconds=10):
     next_boundary = math.ceil(now_ts / interval_seconds) * interval_seconds
     next_wake_ts = next_boundary + offset_seconds
     return epoch + timedelta(seconds=next_wake_ts)
+
+
+def _sleep_until_next(interval_seconds: int, offset_seconds: int = 15):
+    """Sleep until the next K-line boundary + offset."""
+    now = datetime.now()
+    epoch = datetime(1970, 1, 1)
+    now_ts = (now - epoch).total_seconds()
+    next_boundary = math.ceil(now_ts / interval_seconds) * interval_seconds
+    next_wake = epoch + timedelta(seconds=next_boundary + offset_seconds)
+    sleep_secs = (next_wake - now).total_seconds()
+    if sleep_secs > 0:
+        time.sleep(sleep_secs)
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +390,102 @@ def fetch_candles(market_api, inst_id, bar="5m", limit=300):
     return df
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# K线本地缓存 — 避免每轮重复拉取大量历史数据
+# ═════════════════════════════════════════════════════════════════════════
+
+
+def _okx_cache_path(inst_id: str, interval: str) -> str:
+    """获取本地 K 线缓存路径。"""
+    norm = inst_id.replace("/", "_").replace(":", "_").replace("-", "_")
+    return os.path.join(CACHE_DIR, f"okx_{norm}_{interval}.parquet")
+
+
+def _load_okx_cache(inst_id: str, interval: str):
+    """从本地 parquet 加载缓存的 K 线数据。"""
+    path = _okx_cache_path(inst_id, interval)
+    if os.path.exists(path):
+        try:
+            df = pd.read_parquet(path)
+            if not df.empty and "timestamp" in df.columns:
+                log_message(f"K线缓存加载: {path} ({len(df)} bars)")
+                return df
+        except Exception as e:
+            log_message(f"K线缓存读取失败: {e}，重新获取")
+    return None
+
+
+def _save_okx_cache(df, inst_id: str, interval: str):
+    """将 K 线数据保存到本地 parquet 缓存。"""
+    if df is None or df.empty:
+        return
+    path = _okx_cache_path(inst_id, interval)
+    df.to_parquet(path, index=False)
+    log_message(f"K线缓存保存: {path} ({len(df)} bars)")
+
+
+def _merge_okx_klines(df_new, df_cache):
+    """合并新获取和缓存的 K 线，去重排序。"""
+    if df_cache is not None:
+        combined = pd.concat([df_cache, df_new], ignore_index=True)
+    else:
+        combined = df_new
+    combined = (
+        combined.drop_duplicates(subset=["timestamp"], keep="last")
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
+    return combined
+
+
+def ensure_okx_klines(
+    market_api,
+    inst_id: str,
+    interval: str,
+    required_bars: int,
+    fetch_limit: int = 500,
+) -> pd.DataFrame:
+    """确保有足够的 K 线历史数据，优先使用本地缓存，不足时补充 API。
+
+    流程:
+        1. 加载本地缓存
+        2. 拉取最近 fetch_limit 根
+        3. 合并去重
+        4. 不足时从本地 parquet seed
+        5. 保存回缓存
+    """
+    cache = _load_okx_cache(inst_id, interval)
+    recent = fetch_candles(market_api, inst_id, bar=interval, limit=fetch_limit)
+
+    if recent is not None:
+        df = _merge_okx_klines(recent, cache)
+    elif cache is not None:
+        log_message(f"警告: API 拉取失败，使用缓存 ({len(cache)} bars)")
+        df = cache
+    else:
+        log_message("K线数据全部不可用")
+        return None
+
+    # 不足时从本地 parquet seed
+    if len(df) < required_bars:
+        log_message(f"K线不足: {len(df)} < {required_bars}，尝试本地 parquet 补充...")
+        local_df = load_local_candles(inst_id, bar=interval, limit=required_bars)
+        if local_df is not None:
+            df = _merge_okx_klines(local_df, df)
+
+    if len(df) >= required_bars:
+        _save_okx_cache(df, inst_id, interval)
+        log_message(f"K线就绪: {len(df)} bars (需要 {required_bars})")
+    else:
+        log_message(
+            f"警告: K线缓存仍不足 ({len(df)} < {required_bars})，regime/permission 计算可能不可靠"
+        )
+        # 仍保存缓存以备增量
+        _save_okx_cache(df, inst_id, interval)
+
+    return df
+
+
 def _okx_symbol_to_local_symbol(inst_id):
     return inst_id.upper().replace("-SWAP", "").replace("-", "")
 
@@ -465,26 +575,31 @@ def cancel_all_orders(trade_api, inst_id):
 
 
 @retry_on_exception(max_retries=3, delay=1.0)
-def place_market_order(trade_api, inst_id, side, pos_side, sz, td_mode="cross"):
+def place_market_order(trade_api, inst_id, side, pos_side, sz, td_mode="cross", reduce_only=False):
     """
     下市价单 (Taker)。
     side: buy / sell
     pos_side: long / short
     sz: 数量（张数或币数）
     td_mode: cross(全仓) / isolated(逐仓)
+    reduce_only: True=只允许平仓
     """
-    resp = trade_api.place_order(
-        instId=inst_id,
-        tdMode=td_mode,
-        side=side,
-        posSide=pos_side,
-        ordType="market",
-        sz=str(sz),
-    )
+    params = {
+        "instId": inst_id,
+        "tdMode": td_mode,
+        "side": side,
+        "posSide": pos_side,
+        "ordType": "market",
+        "sz": str(sz),
+    }
+    if reduce_only:
+        params["reduceOnly"] = True
+    resp = trade_api.place_order(**params)
 
     if resp.get("code") == "0":
         order_id = resp["data"][0].get("ordId")
-        log_message(f"市价单成功 [{side.upper()} {pos_side}] 订单ID: {order_id}")
+        ro_tag = " REDUCE_ONLY" if reduce_only else ""
+        log_message(f"市价单成功 [{side.upper()} {pos_side}{ro_tag}] 订单ID: {order_id}")
         return order_id
     else:
         log_message(f"市价单失败: {resp}")
@@ -492,21 +607,27 @@ def place_market_order(trade_api, inst_id, side, pos_side, sz, td_mode="cross"):
 
 
 @retry_on_exception(max_retries=3, delay=1.0)
-def place_limit_order(trade_api, inst_id, side, pos_side, sz, px, td_mode="cross"):
+def place_limit_order(
+    trade_api, inst_id, side, pos_side, sz, px, td_mode="cross", reduce_only=False
+):
     """下限价单 (Maker)"""
-    resp = trade_api.place_order(
-        instId=inst_id,
-        tdMode=td_mode,
-        side=side,
-        posSide=pos_side,
-        ordType="limit",
-        px=str(px),
-        sz=str(sz),
-    )
+    params = {
+        "instId": inst_id,
+        "tdMode": td_mode,
+        "side": side,
+        "posSide": pos_side,
+        "ordType": "limit",
+        "px": str(px),
+        "sz": str(sz),
+    }
+    if reduce_only:
+        params["reduceOnly"] = True
+    resp = trade_api.place_order(**params)
     if resp.get("code") == "0":
         order_id = resp["data"][0].get("ordId")
+        ro_tag = " REDUCE_ONLY" if reduce_only else ""
         log_message(
-            f"限价单成功 [{side.upper()} {pos_side}] 订单ID: {order_id} 价格={px} 数量={sz}"
+            f"限价单成功 [{side.upper()} {pos_side}{ro_tag}] 订单ID: {order_id} 价格={px} 数量={sz}"
         )
         return order_id
     else:
@@ -553,6 +674,16 @@ def execute_trade(
     signal_id: 0=平仓, 1=持有, 2=做多, 3=做空
     force_ioc: True=强制用市价单(兜底模式), False=先尝试Maker挂单
     """
+    # pending_close 保护: 平仓未确认前不准开新仓
+    if state.get("pending_close"):
+        log_message(
+            f"[跳过交易] 等待 pending_close 成交 "
+            f"(order_id={state.get('pending_close_order_id')}) signal={signal_id}"
+        )
+        state["last_signal"] = signal_id
+        state["last_update"] = datetime.now().isoformat()
+        return state
+
     position = state.get("position", 0)
     strategy_size = state.get("strategy_size", 0.0)
     trades = state.get("trades", [])
@@ -624,6 +755,7 @@ def execute_trade(
                 close_plan.size,
                 close_plan.price,
                 td_mode,
+                reduce_only=True,
             )
             order_price = close_plan.price
         elif close_plan.action == "taker":
@@ -634,6 +766,7 @@ def execute_trade(
                 close_plan.position_side,
                 close_plan.size,
                 td_mode,
+                reduce_only=True,
             )
             order_price = current_price
         else:
@@ -668,13 +801,61 @@ def execute_trade(
                 pnl_pct=f"{close_plan.pnl_pct * 100:+.2f}%",
                 signal=signal_id,
             )
+
+            if close_plan.action == "maker":
+                # Maker 平仓: 挂单未成交前不清 position，设 pending_close
+                state["pending_close"] = True
+                state["pending_close_order_id"] = order_id
+                state["pending_close_reason"] = close_label
+                state["pending_close_target"] = target_pos
+                state["pending_close_created_at"] = datetime.now().isoformat()
+                log_message(f"[PENDING_CLOSE] 挂出平仓maker单等待成交, order_id={order_id}")
+                state["trades"] = trades
+                state["last_signal"] = signal_id
+                state["last_update"] = datetime.now().isoformat()
+                state["tp_order_id"] = None
+                state["tp_price"] = 0.0
+                state["tp_side"] = None
+                return state
+
+            elif close_plan.action == "taker":
+                # Taker 平仓: 再查询实际持仓确认
+                actual_after = get_position(account_api, inst_id)
+                if abs(actual_after) < lot_sz * 0.5:
+                    state["position"] = 0
+                    state["strategy_size"] = 0.0
+                    state["entry_bar"] = 0
+                    log_message("[平仓确认] 市价单已成交, 持仓归零")
+                else:
+                    state["position"] = 1 if actual_after > 0 else -1
+                    state["strategy_size"] = abs(actual_after)
+                    state["pending_close"] = True
+                    state["pending_close_order_id"] = order_id
+                    state["pending_close_reason"] = close_label
+                    state["pending_close_target"] = target_pos
+                    state["pending_close_created_at"] = datetime.now().isoformat()
+                    log_message(
+                        f"[PENDING_CLOSE] 市价单未完全成交: actual_after={actual_after:.6f}"
+                    )
+                state["trades"] = trades
+                state["last_signal"] = signal_id
+                state["last_update"] = datetime.now().isoformat()
+                state["tp_order_id"] = None
+                state["tp_price"] = 0.0
+                state["tp_side"] = None
+                return state
+
         else:
             log_message(f"[{close_label}失败] {close_type}单未成交")
-        state["position"] = 0
-        state["strategy_size"] = 0.0
-        state["entry_bar"] = 0
 
-    # --- 开新仓 ---
+        # 平仓失败: 保留 position，不清仓也不开反向
+        state["trades"] = trades
+        state["last_signal"] = signal_id
+        state["last_update"] = datetime.now().isoformat()
+        return state
+
+    # --- 开新仓（仅当无 pending_close 且 position==target 时到达此处） ---
+    assert not state.get("pending_close"), "pending_close 应已在 execute_trade 入口拦截"
     log_message(
         f"[交易] 检查开仓: target_pos={target_pos} state_position={state.get('position', 0)} force_ioc={force_ioc}"
     )
@@ -701,7 +882,13 @@ def execute_trade(
                 log_message(f"[跳过{open_label}] {plan.reason}")
         elif plan.action == "ioc":
             order_id = place_market_order(
-                trade_api, inst_id, plan.side, plan.position_side, plan.size, td_mode
+                trade_api,
+                inst_id,
+                plan.side,
+                plan.position_side,
+                plan.size,
+                td_mode,
+                reduce_only=False,
             )
             if order_id:
                 trades.append(
@@ -746,6 +933,7 @@ def execute_trade(
                 plan.size,
                 plan.price,
                 td_mode,
+                reduce_only=False,
             )
             if order_id:
                 trades.append(
@@ -826,7 +1014,11 @@ def manage_tp_order(
         return state
 
     # 计算止盈价格和方向
-    tp_pct = getattr(strategy, "take_profit_pct", 0.02)
+    # v2.1: strategy is None, 不挂默认 TP; 只有 checkpoint 明确配置才挂
+    if strategy is None:
+        tp_pct = 0.0
+    else:
+        tp_pct = getattr(strategy, "take_profit_pct", 0.0)
     if tp_pct <= 0:
         return cancel_tp_order(trade_api, inst_id, state)
     if pos == 1:
@@ -855,9 +1047,9 @@ def manage_tp_order(
     if order_size <= 0:
         return state
 
-    # 挂止盈限价单 (Maker)
+    # 挂止盈限价单 (Maker, reduce-only)
     order_id = place_limit_order(
-        trade_api, inst_id, tp_side, tp_pos_side, order_size, tp_price, td_mode
+        trade_api, inst_id, tp_side, tp_pos_side, order_size, tp_price, td_mode, reduce_only=True
     )
     if order_id:
         state["tp_order_id"] = order_id
@@ -986,13 +1178,22 @@ def force_close(
         order_price = compute_order_price(side, best_bid, best_ask, tick_sz)
         if order_price:
             order_id = place_limit_order(
-                trade_api, inst_id, side, pos_side, close_size, order_price, td_mode
+                trade_api,
+                inst_id,
+                side,
+                pos_side,
+                close_size,
+                order_price,
+                td_mode,
+                reduce_only=True,
             )
         else:
             order_id = None
         fee_label = "Maker"
     else:
-        order_id = place_market_order(trade_api, inst_id, side, pos_side, close_size, td_mode)
+        order_id = place_market_order(
+            trade_api, inst_id, side, pos_side, close_size, td_mode, reduce_only=True
+        )
         order_price = current_price
         fee_label = "Taker"
 
@@ -1011,16 +1212,44 @@ def force_close(
             }
         )
         state["trades"] = trades
-        state["position"] = 0
-        state["strategy_size"] = 0.0
-        state["entry_bar"] = 0
-        state["last_signal"] = 0
+
+        if use_maker:
+            # Maker 强制平仓: 设 pending_close，不清 position
+            state["pending_close"] = True
+            state["pending_close_order_id"] = order_id
+            state["pending_close_reason"] = f"FORCE_CLOSE_{fee_label}: {reason}"
+            state["pending_close_target"] = 0
+            state["pending_close_created_at"] = datetime.now().isoformat()
+            log_message(
+                f"[PENDING_CLOSE] 强制平仓-maker挂单等待成交: "
+                f"{pos_name}{side} {close_size:.8f} @ {order_price}"
+            )
+        else:
+            # Taker 强制平仓: 再查询实际持仓确认
+            actual_after = get_position(account_api, inst_id)
+            if abs(actual_after) < lot_sz * 0.5:
+                state["position"] = 0
+                state["strategy_size"] = 0.0
+                state["entry_bar"] = 0
+                state["last_signal"] = 0
+                log_message(
+                    f"[强制平仓-{fee_label}] {reason}，"
+                    f"{pos_name}{side} {close_size:.8f} @ {order_price}"
+                )
+            else:
+                state["position"] = 1 if actual_after > 0 else -1
+                state["strategy_size"] = abs(actual_after)
+                state["pending_close"] = True
+                state["pending_close_order_id"] = order_id
+                state["pending_close_reason"] = f"FORCE_CLOSE_{fee_label}: {reason}"
+                state["pending_close_target"] = 0
+                state["pending_close_created_at"] = datetime.now().isoformat()
+                log_message(
+                    f"[PENDING_CLOSE] 强制平仓-taker未完全成交: actual_after={actual_after:.6f}"
+                )
         state["tp_order_id"] = None
         state["tp_price"] = 0.0
         state["tp_side"] = None
-        log_message(
-            f"[强制平仓-{fee_label}] {reason}，{pos_name}{side} {close_size:.8f} @ {order_price}"
-        )
         notify_trade_action(
             f"强制平仓-{fee_label}",
             notify_email_to=notify_email_to,
@@ -1104,9 +1333,15 @@ def print_status(account_api, inst_id, state, leverage=1.0, contract_value=1.0):
 
 def _v21_generate_signal(
     df,
-    bull_s, bear_s, neutral_s,
-    bull_cfg: RiskOffConfig, bear_cfg: RiskOffConfig, neutral_cfg: RiskOffConfig,
-    policy: str, regime_fast: int, regime_slow: int,
+    bull_s,
+    bear_s,
+    neutral_s,
+    bull_cfg: RiskOffConfig,
+    bear_cfg: RiskOffConfig,
+    neutral_cfg: RiskOffConfig,
+    policy: str,
+    regime_fast: int,
+    regime_slow: int,
     enable_short: bool,
 ) -> tuple:
     n = len(df)
@@ -1116,8 +1351,12 @@ def _v21_generate_signal(
     regimes = build_daily_regime_labels(df, fast_days=regime_fast, slow_days=regime_slow)
     adx_full, _, _ = compute_adx(df, 14)
     daily_ctx = compute_daily_indicators(df)
-    routed = route_regime_signals(bull_raw, bear_raw, neutral_raw, regimes, regime_change_policy=policy)
-    al, as_arr, ff, eo = build_permission_arrays(df, regimes, bull_cfg, bear_cfg, neutral_cfg, daily_ctx, adx_full)
+    routed = route_regime_signals(
+        bull_raw, bear_raw, neutral_raw, regimes, regime_change_policy=policy
+    )
+    al, as_arr, ff, eo = build_permission_arrays(
+        df, regimes, bull_cfg, bear_cfg, neutral_cfg, daily_ctx, adx_full
+    )
     final_signals = apply_permission_arrays(routed, al, as_arr, ff, eo)
     i = n - 1
     regime = str(regimes[i])
@@ -1138,10 +1377,14 @@ def _v21_generate_signal(
     else:
         perm_reason = f"hold (regime={regime})"
     return final_sig, {
-        "regime": regime, "permission_reason": perm_reason,
-        "allow_long": bool(al[i]), "allow_short": bool(as_arr[i]),
-        "force_flat": bool(ff[i]), "exit_only": bool(eo[i]),
-        "raw_signal": raw_sig, "routed_signal": int(final_signals[i]),
+        "regime": regime,
+        "permission_reason": perm_reason,
+        "allow_long": bool(al[i]),
+        "allow_short": bool(as_arr[i]),
+        "force_flat": bool(ff[i]),
+        "exit_only": bool(eo[i]),
+        "raw_signal": raw_sig,
+        "routed_signal": int(final_signals[i]),
     }
 
 
@@ -1264,9 +1507,29 @@ def main():
         log_message(f"BEAR:  {checkpoint['bear']['candidate']}")
         log_message(f"NEUTRAL: {checkpoint['neutral']['candidate']}")
         log_message(f"Policy: {v21_policy}")
-        candle_limit = max(500, 100 * 288 + 500)
-        required_bars = max(375, checkpoint["bull"]["strategy_params"].get("entry_lookback", 375)) + 10
-        log_message(f"K线需求: v2.1 daily indicators, 拉取={candle_limit}")
+        # 根据 regime slow_days 和策略窗口计算所需历史量
+        bars_per_day = 86400 // interval_seconds
+        max_strategy_window = (
+            max(
+                v21_bull_s.entry_lookback,
+                v21_bull_s.exit_lookback,
+                v21_bear_s.entry_lookback,
+                v21_bear_s.exit_lookback,
+                v21_neutral_s.entry_lookback,
+                v21_neutral_s.exit_lookback,
+            )
+            if hasattr(v21_bull_s, "entry_lookback")
+            else 8000
+        )
+        required_history = (v21_regime_slow + 60) * bars_per_day
+        candle_limit = max(max_strategy_window + 500, required_history)
+        required_bars = max_strategy_window + 10
+        log_message(
+            f"K线需求: max_window={max_strategy_window} "
+            f"regime_slow={v21_regime_slow} "
+            f"required_bars={required_bars} "
+            f"candle_limit={candle_limit}"
+        )
     else:
         params = dict(checkpoint.get("params") or {})
         strategy_type = checkpoint.get("strategy", "bollinger_trend_filter")
@@ -1283,7 +1546,9 @@ def main():
             log_message(line)
         required_bars = int(getattr(strategy, "warmup_bars", getattr(strategy, "window", 300))) + 10
         candle_limit = max(500, required_bars + 100, getattr(strategy, "entry_lookback", 0) + 100)
-        log_message(f"K线需求: strategy.window={getattr(strategy, 'window', 0)}, 拉取={candle_limit}")
+        log_message(
+            f"K线需求: strategy.window={getattr(strategy, 'window', 0)}, 拉取={candle_limit}"
+        )
         v21_bull_s = v21_bear_s = v21_neutral_s = None
         v21_bull_cfg = v21_bear_cfg = v21_neutral_cfg = None
         v21_policy = ""
@@ -1369,6 +1634,11 @@ def main():
             "v21_exit_only": False,
             "v21_raw_signal": 1,
             "v21_routed_signal": 1,
+            "pending_close": False,
+            "pending_close_order_id": None,
+            "pending_close_reason": "",
+            "pending_close_target": 0,
+            "pending_close_created_at": "",
         }
         log_message(
             f"初始化账户，保证金: {args.capital:.2f} USDT, 杠杆: {args.leverage}x, "
@@ -1398,6 +1668,11 @@ def main():
         state.setdefault("v21_exit_only", False)
         state.setdefault("v21_raw_signal", 1)
         state.setdefault("v21_routed_signal", 1)
+        state.setdefault("pending_close", False)
+        state.setdefault("pending_close_order_id", None)
+        state.setdefault("pending_close_reason", "")
+        state.setdefault("pending_close_target", 0)
+        state.setdefault("pending_close_created_at", "")
         if "strategy_btc" in state and "strategy_size" not in state:
             state["strategy_size"] = state.pop("strategy_btc")
         if "initial_equity" not in state:
@@ -1455,23 +1730,141 @@ def main():
                         state["pending_open"] = False
                         state["pending_order_id"] = None
 
-                # 1. 获取 K 线数据
-                df_api = fetch_candles(
-                    market_api, args.symbol, bar=args.interval, limit=candle_limit
-                )
-                if df_api is None or len(df_api) < required_bars:
-                    df_local = load_local_candles(
-                        args.symbol, bar=args.interval, limit=candle_limit
-                    )
-                    df = merge_candle_history(df_local, df_api, limit=candle_limit)
-                    if df_local is not None:
+                # ── pending_close 检查 ─────────────────────────────────────
+                if not args.signal_only and state.get("pending_close"):
+                    actual_pos = get_position(account_api, args.symbol)
+                    pc_id = state.get("pending_close_order_id")
+
+                    if abs(actual_pos) < lot_sz * 0.5:
                         log_message(
-                            f"K线API不足，合并本地历史: api={0 if df_api is None else len(df_api)} local={len(df_local)} merged={0 if df is None else len(df)}"
+                            f"[PENDING_CLOSE_FILLED] 持仓已归零, 清除 pending_close "
+                            f"(order_id={pc_id})"
                         )
+                        state["position"] = 0
+                        state["strategy_size"] = 0.0
+                        state["entry_bar"] = 0
+                        state["tp_order_id"] = None
+                        state["tp_price"] = 0.0
+                        state["tp_side"] = None
+                        state["pending_close"] = False
+                        state["pending_close_order_id"] = None
+                        state["pending_close_reason"] = ""
+                        state["pending_close_target"] = 0
+                        state["pending_close_created_at"] = ""
+                        save_state(state)
+                        if args.once:
+                            break
+                        _sleep_until_next(interval_seconds)
+                        continue
+
+                    if pc_id:
+                        try:
+                            resp = trade_api.get_order(instId=args.symbol, ordId=pc_id)
+                            if resp.get("code") == "0" and resp.get("data"):
+                                od = resp["data"][0]
+                                o_state = od.get("state", "")
+                                fill_sz = float(od.get("fillSz", 0) or 0)
+                        except Exception:
+                            o_state = None
+                            fill_sz = 0.0
+
+                        if o_state == "filled":
+                            log_message(
+                                f"[PENDING_CLOSE_FILLED] 平仓单已成交, actual_pos={actual_pos:.6f}"
+                            )
+                            if abs(actual_pos) < lot_sz * 0.5:
+                                state["position"] = 0
+                                state["strategy_size"] = 0.0
+                                state["entry_bar"] = 0
+                            else:
+                                state["position"] = 1 if actual_pos > 0 else -1
+                                state["strategy_size"] = abs(actual_pos)
+                            state["pending_close"] = False
+                            state["pending_close_order_id"] = None
+                            state["pending_close_reason"] = ""
+                            state["pending_close_target"] = 0
+                            state["pending_close_created_at"] = ""
+                            save_state(state)
+                            if args.once:
+                                break
+                            _sleep_until_next(interval_seconds)
+                            continue
+
+                        elif o_state in ("live", "partially_filled"):
+                            if abs(actual_pos) > 0:
+                                state["strategy_size"] = abs(actual_pos)
+                            log_message(
+                                f"[PENDING_CLOSE] 平仓单未完成: "
+                                f"actual_pos={actual_pos:.6f} state={o_state}"
+                            )
+                            save_state(state)
+                            if args.once:
+                                break
+                            _sleep_until_next(interval_seconds)
+                            continue
+
+                        else:
+                            log_message(
+                                f"[PENDING_CLOSE_CANCELED] 平仓单取消/过期: state={o_state}"
+                            )
+                            state["pending_close"] = False
+                            state["pending_close_order_id"] = None
+                            state["pending_close_reason"] = ""
+                            state["pending_close_target"] = 0
+                            state["pending_close_created_at"] = ""
+                            if abs(actual_pos) >= lot_sz * 0.5:
+                                state["position"] = 1 if actual_pos > 0 else -1
+                                state["strategy_size"] = abs(actual_pos)
+                            save_state(state)
+                            if args.once:
+                                break
+                            _sleep_until_next(interval_seconds)
+                            continue
+                    else:
+                        log_message("[PENDING_CLOSE_CANCELED] pending_close 异常: 无 order_id")
+                        state["pending_close"] = False
+                        state["pending_close_order_id"] = None
+                        state["pending_close_reason"] = ""
+                        state["pending_close_target"] = 0
+                        state["pending_close_created_at"] = ""
+
+                # 1. 获取 K 线数据
+                if is_v21:
+                    df = ensure_okx_klines(market_api, args.symbol, args.interval, candle_limit)
+                else:
+                    df_api = fetch_candles(
+                        market_api, args.symbol, bar=args.interval, limit=candle_limit
+                    )
+                    if df_api is None or len(df_api) < required_bars:
+                        df_local = load_local_candles(
+                            args.symbol, bar=args.interval, limit=candle_limit
+                        )
+                        df = merge_candle_history(df_local, df_api, limit=candle_limit)
+                        if df_local is not None:
+                            log_message(
+                                f"K线API不足，合并本地历史: api={0 if df_api is None else len(df_api)} local={len(df_local)} merged={0 if df is None else len(df)}"
+                            )
+                        else:
+                            df = df_api
                     else:
                         df = df_api
-                else:
-                    df = df_api
+
+                # ── closed-candle-only guard ─────────────────────────────
+                # 信号生成前丢弃未收盘 K 线，确保与回测/replay 一致
+                if is_v21 and df is not None and not df.empty:
+                    interval_ms = interval_seconds * 1000
+                    safety_delay_ms = 60000
+                    last_ts = int(df["timestamp"].iloc[-1])
+                    now_ms = int(time.time() * 1000)
+                    if last_ts + interval_ms + safety_delay_ms > now_ms:
+                        n_before = len(df)
+                        df = df.iloc[:-1].reset_index(drop=True)
+                        used_ts = df["timestamp"].iloc[-1] if not df.empty else None
+                        log_message(
+                            f"[已收盘K线] 丢弃未完成K线: last_bar_ts={last_ts} "
+                            f"now_ms={now_ms} | {n_before} -> {len(df)} bars | "
+                            f"used_last_closed={used_ts}"
+                        )
 
                 if df is None or len(df) < required_bars:
                     log_message(
@@ -1484,9 +1877,16 @@ def main():
                     if is_v21:
                         # ---- v2.1 regime-permission pipeline ----
                         signal_id, v21_diag = _v21_generate_signal(
-                            df, v21_bull_s, v21_bear_s, v21_neutral_s,
-                            v21_bull_cfg, v21_bear_cfg, v21_neutral_cfg,
-                            v21_policy, v21_regime_fast, v21_regime_slow,
+                            df,
+                            v21_bull_s,
+                            v21_bear_s,
+                            v21_neutral_s,
+                            v21_bull_cfg,
+                            v21_bear_cfg,
+                            v21_neutral_cfg,
+                            v21_policy,
+                            v21_regime_fast,
+                            v21_regime_slow,
                             enable_short,
                         )
                         current_price = float(df.iloc[-1]["close"])
@@ -1518,7 +1918,8 @@ def main():
                             exit_reason = f"risk-off: short no longer allowed ({v21_diag['permission_reason']})"
                         else:
                             should_exit, exit_reason = check_stop_loss(
-                                state, current_price,
+                                state,
+                                current_price,
                                 stop_loss_pct=args.stop_loss,
                                 max_hold_bars=99999,
                             )
@@ -1560,9 +1961,9 @@ def main():
                         if is_v21:
                             log_message(
                                 f"[Signal-Only] signal={signal_id} {signal_labels.get(signal_id, '未知')} | "
-                                f"v2.1: regime={state.get('v21_regime','?')} "
-                                f"perm={state.get('v21_permission_reason','?')} | "
-                                f"raw={state.get('v21_raw_signal','?')} routed={state.get('v21_routed_signal','?')} | "
+                                f"v2.1: regime={state.get('v21_regime', '?')} "
+                                f"perm={state.get('v21_permission_reason', '?')} | "
+                                f"raw={state.get('v21_raw_signal', '?')} routed={state.get('v21_routed_signal', '?')} | "
                                 "不执行持仓同步、撤单、下单或状态保存"
                             )
                         else:
@@ -1571,25 +1972,51 @@ def main():
                                 "不执行持仓同步、撤单、下单或状态保存"
                             )
                     elif should_exit:
-                        # 超时 -> Maker, 止损 -> Taker
-                        is_timeout = "时间退出" in exit_reason
-                        state["pending_open"] = False
-                        state = force_close(
-                            trade_api,
-                            account_api,
-                            args.symbol,
-                            state,
-                            current_price,
-                            best_bid,
-                            best_ask,
-                            tick_sz,
-                            lot_sz,
-                            exit_reason,
-                            use_maker=is_timeout,
-                            td_mode=args.margin_mode,
-                            notify_email_to=args.notify_email_to,
-                            mode_name=mode_name,
+                        # force_flat / risk-off / permission 禁止→taker reduce-only
+                        is_risk_off = any(
+                            kw in exit_reason.lower()
+                            for kw in ["force_flat", "risk-off", "not allowed", "permission"]
                         )
+                        is_timeout = "时间退出" in exit_reason
+                        if is_risk_off:
+                            log_message(
+                                f"[FORCE_FLAT_CLOSE] {exit_reason} -> taker reduce-only (风控退出)"
+                            )
+                            state["pending_open"] = False
+                            state = force_close(
+                                trade_api,
+                                account_api,
+                                args.symbol,
+                                state,
+                                current_price,
+                                best_bid,
+                                best_ask,
+                                tick_sz,
+                                lot_sz,
+                                exit_reason,
+                                use_maker=False,
+                                td_mode=args.margin_mode,
+                                notify_email_to=args.notify_email_to,
+                                mode_name=mode_name,
+                            )
+                        else:
+                            state["pending_open"] = False
+                            state = force_close(
+                                trade_api,
+                                account_api,
+                                args.symbol,
+                                state,
+                                current_price,
+                                best_bid,
+                                best_ask,
+                                tick_sz,
+                                lot_sz,
+                                exit_reason,
+                                use_maker=is_timeout,
+                                td_mode=args.margin_mode,
+                                notify_email_to=args.notify_email_to,
+                                mode_name=mode_name,
+                            )
                     else:
                         # === 检查 pending_open 状态 ===
                         pending = state.get("pending_open", False)

@@ -131,7 +131,7 @@ def test_live_okx_entry_uses_shared_entry_plan(monkeypatch) -> None:
     )
     orders = []
 
-    def fake_limit_order(trade_api, inst_id, side, pos_side, sz, px, td_mode="cross"):
+    def fake_limit_order(trade_api, inst_id, side, pos_side, sz, px, td_mode="cross", reduce_only=False):
         orders.append((trade_api, inst_id, side, pos_side, sz, px, td_mode))
         return "okx-order-1"
 
@@ -241,7 +241,13 @@ def test_live_okx_close_uses_shared_close_plan(monkeypatch) -> None:
     module = importlib.import_module("live_okx_quant")
     monkeypatch.setattr(module, "log_message", lambda _msg: None)
     monkeypatch.setattr(module, "cancel_all_orders", lambda _trade_api, _inst_id: True)
-    monkeypatch.setattr(module, "get_position", lambda _account_api, _inst_id: -0.02)
+    pos_call_count = [0]
+
+    def fake_get_position(_account_api, _inst_id):
+        pos_call_count[0] += 1
+        return 0.0 if pos_call_count[0] >= 2 else -0.02
+
+    monkeypatch.setattr(module, "get_position", fake_get_position)
     monkeypatch.setattr(
         module,
         "plan_close_order",
@@ -257,7 +263,7 @@ def test_live_okx_close_uses_shared_close_plan(monkeypatch) -> None:
     )
     orders = []
 
-    def fake_market_order(trade_api, inst_id, side, pos_side, sz, td_mode="cross"):
+    def fake_market_order(trade_api, inst_id, side, pos_side, sz, td_mode="cross", reduce_only=False):
         orders.append((trade_api, inst_id, side, pos_side, sz, td_mode))
         return "okx-close-1"
 
