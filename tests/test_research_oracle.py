@@ -328,6 +328,56 @@ def test_baseline_metric_regression():
     print(f"    Oracle version: {result.get('oracle_version')}")
 
 
+def test_baseline_via_json_params():
+    """Verify run_oracle(use_baseline=True) works (fresh clone path)."""
+    result = research_oracle.run_oracle(use_baseline=True)
+
+    assert "experiment_id" in result, "No experiment_id (use_baseline failed)"
+    assert result["strategy"] == "channel_breakout_v21"
+    assert result["flags"]["status"] == "BASELINE"
+
+    oos_raw = result["metrics"]["oos"]["raw"]
+    assert 1.40 <= oos_raw["return"] <= 1.70, f"JSON baseline OOS return out of range: {oos_raw['return']:.4f}"
+    assert oos_raw["trades"] > 0, "No trades from JSON baseline"
+
+    print("  [PASS] Baseline runs from JSON params")
+    print(f"    OOS return: {oos_raw['return']:.4f}")
+    print(f"    OOS trades: {oos_raw['trades']}")
+
+
+def test_baseline_json_vs_pt_parity():
+    """Verify JSON params produce identical results to .pt checkpoint.
+
+    This proves the JSON baseline is a faithful reproduction of the
+    frozen .pt checkpoint — critical for fresh clones without .pt access.
+    """
+    result_json = research_oracle.run_oracle(use_baseline=True)
+    result_pt = research_oracle.run_oracle(checkpoint_path=CKPT)
+
+    # Compare key metrics
+    mj = result_json["metrics"]["oos"]["raw"]
+    mp = result_pt["metrics"]["oos"]["raw"]
+
+    assert abs(mj["return"] - mp["return"]) < 1e-6, (
+        f"OOS return differs: JSON={mj['return']:.8f} PT={mp['return']:.8f}"
+    )
+    assert abs(mj["dd"] - mp["dd"]) < 1e-6, (
+        f"OOS DD differs: JSON={mj['dd']:.8f} PT={mp['dd']:.8f}"
+    )
+    assert mj["trades"] == mp["trades"], (
+        f"Trade count differs: JSON={mj['trades']} PT={mp['trades']}"
+    )
+
+    # Flags should be identical
+    assert result_json["flags"]["status"] == result_pt["flags"]["status"]
+    assert result_json["flags"]["baseline_known_risks"] == result_pt["flags"]["baseline_known_risks"]
+
+    print("  [PASS] JSON params ↔ .pt checkpoint parity verified")
+    print(f"    OOS return: {mj['return']:.4f} (both)")
+    print(f"    OOS trades: {mj['trades']} (both)")
+    print(f"    Status: {result_json['flags']['status']} (both)")
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -347,6 +397,8 @@ if __name__ == "__main__":
         ("Rolling regime distribution valid", test_rolling_regime_distribution_valid),
         ("Baseline status (not REJECT)", test_baseline_status),
         ("Baseline metric regression", test_baseline_metric_regression),
+        ("Baseline via JSON params (fresh clone path)", test_baseline_via_json_params),
+        ("JSON params vs .pt checkpoint parity", test_baseline_json_vs_pt_parity),
     ]
 
     failed = 0

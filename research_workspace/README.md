@@ -67,24 +67,32 @@ Status: draft | submitted | rejected | accepted
 
 Observations, patterns noticed in results, dead ends, meta-reflections.
 
-### ✅ (Phase 2+) Evaluate candidates via oracle (READ-ONLY call)
+### ✅ (Phase 2+) Evaluate via oracle
 
-**Note: oracle does NOT exist in Phase 1. This section is for Phase 2+ reference only.**
+Oracle is at Phase 2 freeze v0.1.0. All commands under `scripts/`:
 
 ```bash
-uv run python research_oracle.py \
-    --candidate research_workspace/candidates/exp_NNNN.yaml \
-    --symbol ETHUSDT --interval 5m --days 2600 \
-    --mode fixed-split \
-    --output /tmp/oracle_result.json
+# Evaluate frozen baseline (from committed JSON params)
+uv run python scripts/research_oracle.py --baseline
+
+# Evaluate a .pt checkpoint
+uv run python scripts/research_oracle.py \
+    --checkpoint checkpoints/eth_optimal.pt
+
+# Dry-run (no output files)
+uv run python scripts/research_oracle.py --baseline --no-write
+
+# Read output
+cat research_workspace/oracle_report.json | python -m json.tool
+cat research_workspace/results.tsv
 ```
 
-You do NOT have permission to modify `research_oracle.py`.
+You do NOT have permission to modify `scripts/research_oracle.py`.
 
 ### ✅ Read oracle results
 
 ```bash
-cat /tmp/oracle_result.json | python -m json.tool
+cat research_workspace/oracle_report.json | python -m json.tool
 ```
 
 ## What You CANNOT Do
@@ -155,9 +163,13 @@ Marginal improvements (DD < 2% AND return < 5%) are not promoted.
 
 ## Frozen Baseline
 
-`checkpoints/channel_breakout_v2_1_balanced.pt` is the frozen baseline.
-- Never overwrite it
-- Never modify its parameters
+The frozen baseline is defined in:
+`research_workspace/baselines/channel_breakout_v2_1_balanced_params.json`
+
+This JSON file is version-controlled (committed to git). The oracle loads
+it via `--baseline` mode. The `.pt` checkpoint is NOT tracked by git.
+
+- Never modify the baseline JSON file
 - All experiments are compared against it
 - A candidate with correlation > 0.99 vs baseline is a trivial variant
 

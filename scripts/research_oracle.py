@@ -5,7 +5,7 @@ Phase 2 minimal implementation. Read-only: never modifies checkpoints, live
 code, or data. Outputs structured metrics for human and LLM consumption.
 
 Usage:
-    # Evaluate v2.1 frozen baseline (from committed YAML params)
+    # Evaluate v2.1 frozen baseline (from committed JSON params)
     uv run python scripts/research_oracle.py --baseline
 
     # Evaluate a checkpoint
@@ -146,13 +146,13 @@ def _safe_last_datetime(df: pd.DataFrame) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Baseline loading (from frozen YAML params, not .pt)
+# Baseline loading (from frozen JSON params, not .pt)
 # ---------------------------------------------------------------------------
 
 def _load_baseline_params() -> Dict[str, Any]:
-    """Load frozen baseline params from committed YAML.
+    """Load frozen baseline params from committed JSON.
 
-    The YAML is checked into git (unlike .pt checkpoints which are gitignored).
+    The JSON is checked into git (unlike .pt checkpoints which are gitignored).
     This ensures oracle is reproducible on a fresh clone.
     """
     if not FROZEN_BASELINE_PARAMS.exists():
@@ -524,16 +524,20 @@ def _compute_flags(
     warnings = []
     baseline_known_risks = []
 
-    # Auto-reject gates
-    has_dd50 = is_metrics["dd"] < -0.50
+    # Auto-reject gates (check both IS and OOS)
+    has_is_dd50 = is_metrics["dd"] < -0.50
+    has_oos_dd50 = oos_metrics["dd"] < -0.50
+    has_dd50 = has_is_dd50 or has_oos_dd50
+
     has_rolling_neg = (
         rolling.get("6m_min_return") is not None and rolling["6m_min_return"] < 0
     )
 
     if is_baseline:
-        # Baseline: record risks without disqualifying
-        if has_dd50:
+        if has_is_dd50:
             baseline_known_risks.append("IS_DD_OVER_50")
+        if has_oos_dd50:
+            baseline_known_risks.append("OOS_DD_OVER_50")
         if has_rolling_neg:
             baseline_known_risks.append("ROLLING_NEGATIVE_IN_WINDOW")
     else:
@@ -599,7 +603,7 @@ def run_oracle(
     except for writing output files.
     """
     if use_baseline:
-        # Load from frozen YAML params (committed to git)
+        # Load from frozen JSON params (committed to git)
         checkpoint = _load_baseline_params()
         is_v21 = True
         checkpoint_hash = _checkpoint_hash(checkpoint)
@@ -761,6 +765,12 @@ def run_oracle(
             },
             "rolling": rolling,
             "regime": regime_breakdown,
+            "regime_attribution": {
+                "method": "signal_isolated",
+                "pnl_attributed": False,
+                "caveat": "Positions may carry across regime boundaries. "
+                          "Regime returns are directional comparisons, not precise PnL decomposition.",
+            },
             "execution_parity": execution_parity,
             "correlation": correlation,
             "sensitivity": {
@@ -901,7 +911,7 @@ def main():
     )
     parser.add_argument(
         "--baseline", action="store_true",
-        help="Evaluate frozen baseline from committed YAML params.",
+        help="Evaluate frozen baseline from committed JSON params.",
     )
     parser.add_argument(
         "--candidate", type=str, default=None,
@@ -920,7 +930,7 @@ def main():
 
     print(f"=== Research Oracle (Phase 2 freeze {ORACLE_VERSION}) ===")
     if args.baseline:
-        print(f"  Mode: baseline (frozen YAML params)")
+        print(f"  Mode: baseline (frozen JSON params)")
     elif args.checkpoint:
         print(f"  Checkpoint: {args.checkpoint}")
     elif args.candidate:
