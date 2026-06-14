@@ -1714,8 +1714,8 @@ def main():
     parser.add_argument(
         "--notify-email-to",
         type=str,
-        default=None,
-        help="交易通知邮件地址（开仓/平仓/flip/异常时发送）",
+        default=os.environ.get("TRADE_NOTIFY_EMAIL_TO"),
+        help="交易通知邮件地址（默认读取 TRADE_NOTIFY_EMAIL_TO 环境变量）",
     )
     args = parser.parse_args()
 
@@ -2028,6 +2028,7 @@ def main():
                         state["tp_side"] = None
                         state["pending_close"] = False
                         state["pending_close_order_id"] = None
+                        close_reason = state.get("pending_close_reason", "close")
                         state["pending_close_reason"] = ""
                         state["pending_close_target"] = 0
                         state["pending_close_created_at"] = ""
@@ -2037,7 +2038,7 @@ def main():
                                 notify_email_to=state["notify_email_to"],
                                 mode=state.get("mode_name"),
                                 symbol=symbol,
-                                reason=state.get("pending_close_reason", "close"),
+                                reason=close_reason,
                             )
                         save_state(state)
                         if args.once:
