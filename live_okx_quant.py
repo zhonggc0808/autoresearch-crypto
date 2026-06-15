@@ -1343,6 +1343,8 @@ def _v21_generate_signal(
     regime_fast: int,
     regime_slow: int,
     enable_short: bool,
+    adx_gate_threshold: float = 0.0,
+    adx_gate_regimes: tuple = (),
 ) -> tuple:
     n = len(df)
     bull_raw = generate_strategy_signals(bull_s, df, enable_short=bull_s.enable_short)
@@ -1358,14 +1360,26 @@ def _v21_generate_signal(
         df, regimes, bull_cfg, bear_cfg, neutral_cfg, daily_ctx, adx_full
     )
     final_signals = apply_permission_arrays(routed, al, as_arr, ff, eo)
+
+    # ── ADX gate (runtime filter) ────────────────────────────────────
+    adx_gate_active = adx_gate_threshold > 0 and adx_gate_regimes
+    if adx_gate_active:
+        for j in range(n):
+            r = str(regimes[j])
+            if r in adx_gate_regimes and adx_full[j] < adx_gate_threshold:
+                final_signals[j] = 0  # force flat
+
     i = n - 1
     regime = str(regimes[i])
     raw_sig = int(routed[i])
     final_sig = int(final_signals[i])
+    adx_gated = adx_gate_active and regime in adx_gate_regimes and adx_full[i] < adx_gate_threshold
     if ff[i]:
         perm_reason = "force_flat"
     elif eo[i]:
         perm_reason = "exit_only"
+    elif adx_gated:
+        perm_reason = f"adx_gate (ADX={adx_full[i]:.1f}<{adx_gate_threshold}, {regime})"
     elif raw_sig == 2 and final_sig != 2:
         perm_reason = f"long_blocked (regime={regime})"
     elif raw_sig == 3 and final_sig != 3:
@@ -1381,10 +1395,12 @@ def _v21_generate_signal(
         "permission_reason": perm_reason,
         "allow_long": bool(al[i]),
         "allow_short": bool(as_arr[i]),
-        "force_flat": bool(ff[i]),
+        "force_flat": bool(ff[i]) or adx_gated,
         "exit_only": bool(eo[i]),
         "raw_signal": raw_sig,
         "routed_signal": int(final_signals[i]),
+        "adx_gate_active": adx_gate_active,
+        "adx_gate_threshold": adx_gate_threshold if adx_gate_active else 0,
     }
 
 
@@ -1451,7 +1467,22 @@ def main():
     parser.add_argument("--max-hold", type=int, default=48, help="最大持仓K线数（默认 48）")
     parser.add_argument("--short", action="store_true", default=True, help="启用做空（默认开启）")
     parser.add_argument("--long-only", action="store_true", help="只做多，不做空")
+    parser.add_argument(
+        "--adx-gate-threshold",
+        type=float,
+        default=0.0,
+        help="ADX gate: ADX 低于此值时强制平仓（exp_0012 使用 20）",
+    )
+    parser.add_argument(
+        "--adx-gate-regimes",
+        type=str,
+        default="",
+        help="ADX gate 生效的 regime，逗号分隔（exp_0012 使用 NEUTRAL,BEAR）",
+    )
     args = parser.parse_args()
+    args.adx_gate_regimes = tuple(
+        r.strip().upper() for r in args.adx_gate_regimes.split(",") if r.strip()
+    )
 
     if args.live:
         flag = "0"
@@ -1507,6 +1538,13 @@ def main():
         log_message(f"BEAR:  {checkpoint['bear']['candidate']}")
         log_message(f"NEUTRAL: {checkpoint['neutral']['candidate']}")
         log_message(f"Policy: {v21_policy}")
+        if args.adx_gate_threshold > 0 and args.adx_gate_regimes:
+            log_message(
+                f"ADX gate ENABLED: threshold={args.adx_gate_threshold} "
+                f"regimes={','.join(args.adx_gate_regimes)}"
+            )
+        else:
+            log_message("ADX gate: disabled")
         # 根据 regime slow_days 和策略窗口计算所需历史量
         bars_per_day = 86400 // interval_seconds
         max_strategy_window = (
@@ -1928,6 +1966,8 @@ def main():
                             v21_regime_fast,
                             v21_regime_slow,
                             enable_short,
+                            adx_gate_threshold=args.adx_gate_threshold,
+                            adx_gate_regimes=args.adx_gate_regimes,
                         )
                         current_price = float(df.iloc[-1]["close"])
                         current_time = df.iloc[-1]["datetime"]
@@ -1940,6 +1980,7 @@ def main():
                         state["v21_exit_only"] = v21_diag["exit_only"]
                         state["v21_raw_signal"] = v21_diag["raw_signal"]
                         state["v21_routed_signal"] = v21_diag["routed_signal"]
+                        state["v21_adx_gate_active"] = bool(v21_diag.get("adx_gate_active", False))
                         log_message(
                             f"K线: {current_time} | 价格: {current_price:.2f} | "
                             f"regime={v21_diag['regime']} | "
@@ -2004,7 +2045,7 @@ def main():
                                 f"v2.1: regime={state.get('v21_regime', '?')} "
                                 f"perm={state.get('v21_permission_reason', '?')} | "
                                 f"raw={state.get('v21_raw_signal', '?')} routed={state.get('v21_routed_signal', '?')} | "
-                                "不执行持仓同步、撤单、下单或状态保存"
+                                f"adx_gate={state.get('v21_adx_gate_active', False)}"
                             )
                         else:
                             log_message(
