@@ -1,7 +1,8 @@
 # Phase 3B Design — Candidate-Selectable Filters for ROLLING_NEGATIVE
 
-**Status:** Design only — no implementation, no candidates.
+**Status:** ADX gate implemented, tested, and closed. No further ADX tuning.
 **Date:** 2026-06-15
+**Updated:** 2026-06-15 — ADX proven ineffective on ETH 5m (mean ADX 35-37, <20 bars only 5-6%).
 **Target:** Worst 6-month window (2023-02→08, NEUTRAL 61.6%, return -25.1%)
 
 ---
