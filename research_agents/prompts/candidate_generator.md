@@ -140,7 +140,7 @@ blocks as shown above.
 6. Do NOT propose bypassing validation.
 7. If you cannot form a valid hypothesis, output: `{"error": "No valid hypothesis given current constraints."}`
 
-## Generation Constraints (v1.0 — enforced by oracle gate)
+## Generation Constraints (v1.2 — filter quality)
 
 8. **No channel_breakout-only parameter tweaks.**
    Do NOT propose another candidate that only adjusts:
@@ -158,23 +158,27 @@ blocks as shown above.
    or entry blocking conditional on market state.
    A regime_filter-only change does not count.
 
-10. **Do not treat action status as strategy success.**
-    executed_create or executed_fork mean the pipeline executed
-    correctly — they do NOT mean the strategy passed evaluation.
-    Only oracle PASS with clean promotion gates counts as success.
+10. **Volatility gate constraints (based on exp_0045).**
+    A simple high-volatility entry block alone is NOT sufficient —
+    it improved IS DD slightly (-50% → -43%) but made rolling 12m
+    and fee robustness WORSE. If proposing volatility_gate:
+    - Target a specific rolling-window loss regime with precision.
+    - Prefer lower-turnover exposure reduction over broad blocking.
+    - Justify why it preserves fee robustness.
+    - Do NOT re-use the same atr_close_ratio > 0.06 without a structural
+      change to entry/exit logic.
 
-11. **Correlation constraint:** The candidate must target
-    corr_vs_baseline < 0.85 unless explicitly declared as a
-    filter/overlay type.
+11. **Preferred filter directions (pick one):**
+    - block_entries_after_large_adverse_move (drawdown cooldown)
+    - reduce_position_when_high_vol (not full block, reduce size)
+    - block_only_new_shorts_when_high_vol (asymmetric gate)
+    - cooldown_after_drawdown (pause trading after DD spike)
+    Regular high-vol block atr_close_ratio > threshold is already tested
+    and failed — do not repeat it.
 
-12. **Rolling window improvement:** The candidate must include a
-    concrete mechanism intended to improve rolling 6m or 12m negative
-    return windows.
+12. **Correlation constraint:** target corr_vs_baseline < 0.85.
 
-13. **Drawdown ceiling:** Avoid designs likely to produce IS or OOS
-    max drawdown worse than -30%. Any design expected to exceed -40%
-    should be rejected during generation — do not submit it.
+13. **Drawdown ceiling:** avoid designs likely to produce max DD > -40%.
+    Reject proposals expected to exceed this before submission.
 
-14. **Turnover ceiling:** Expected trades/year must be < 1000,
-    preferably < 300. High-turnover strategies must explicitly
-    explain why turnover stays bounded.
+14. **Turnover ceiling:** expected trades/year < 1000, preferably < 300.

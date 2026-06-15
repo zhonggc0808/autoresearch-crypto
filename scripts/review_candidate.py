@@ -161,8 +161,15 @@ def build_context(
     fl = scorecard.get("flags", {})
     pg_summary = _promotion_gates_summary(scorecard)
 
+    # Display candidate ID (exp_NNNN) vs oracle ID for clarity
+    cand_eid = experiment_id
+    oracle_eid = scorecard.get("experiment_id", "?")
+    display_eid = f"{cand_eid}" if cand_eid and cand_eid != oracle_eid else cand_eid
+    if oracle_eid != cand_eid and oracle_eid != "?":
+        display_eid = f"{cand_eid} (oracle: {oracle_eid})"
+
     # Determine evaluation stage
-    eid = scorecard.get("experiment_id", experiment_id)
+    eid = display_eid
     stage = scorecard.get("stage", "1300d")
     verdict_label = v.get("label", "?")
     verdict_reason = v.get("reason", "?")
@@ -175,8 +182,8 @@ def build_context(
 
     context = (
         template
-        .replace("{{EXPERIMENT_ID}}", eid)
-        .replace("{{DESCRIPTION}}", scorecard.get("description") or "(not set)")
+        .replace("{{EXPERIMENT_ID}}", display_eid)
+        .replace("{{DESCRIPTION}}", scorecard.get("description") or scorecard.get("hypothesis", "(not set)")[:160])
         .replace("{{HYPOTHESIS}}", scorecard.get("hypothesis") or "(not set)")
         .replace("{{EVALUATION_STAGE}}", eval_stage)
         .replace("{{VERDICT}}", verdict_label)
