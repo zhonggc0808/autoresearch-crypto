@@ -126,18 +126,41 @@ def validate_candidate(
     return errors
 
 
+# Canonical aliases for filter family names — LLMs often invent near-synonyms
+FILTER_FAMILY_ALIASES: Dict[str, str] = {
+    "drawdown_cooldown": "cooldown_after_drawdown",
+    "dd_cooldown": "cooldown_after_drawdown",
+    "drawdown_guard": "cooldown_after_drawdown",
+    "cooldown_filter": "cooldown_after_drawdown",
+}
+
+
+def _normalize_filter_family(fam: str) -> str:
+    """Map known aliases to canonical filter family names."""
+    return FILTER_FAMILY_ALIASES.get(fam.lower(), fam)
+
+
 def _validate_filter_block(flt: Dict[str, Any], errors: List[str]) -> None:
-    """Validate the filter block structure."""
+    """Validate the filter block structure.
+
+    Normalizes family aliases before validation so that e.g.
+    "drawdown_cooldown" maps to "cooldown_after_drawdown".
+    """
     fam = flt.get("family", "")
     if not fam:
         errors.append("filter.family is required")
         return
 
-    if not _valid_family(fam):
+    # Normalize aliases
+    canonical = _normalize_filter_family(fam)
+    if canonical != fam:
+        flt["family"] = canonical
+
+    if not _valid_family(canonical):
         errors.append(f"Unknown filter family '{fam}'. Registered: {list_families()}")
         return
 
-    fd = _get_family(fam)
+    fd = _get_family(canonical)
     schema_path = SCHEMAS_DIR / fd.schema_file
     if not schema_path.exists():
         errors.append(f"Filter schema not found: {schema_path}")

@@ -129,6 +129,13 @@ params.min_hold_bars.** All channel_breakout params MUST use the
 regime_permission_channel_breakout structure with full bull/bear/neutral
 blocks as shown above.
 
+**Allowed filter.family values are exactly (no aliases):**
+- `volatility_gate`
+- `cooldown_after_drawdown`
+
+Do NOT invent aliases such as drawdown_cooldown, dd_cooldown,
+drawdown_guard, or cooldown_filter.
+
 ## Rules
 
 1. Do NOT include `experiment_id` — the runner assigns it.
