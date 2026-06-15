@@ -107,5 +107,8 @@ them, it will be rejected.
 5. `promote_review` requires BOTH windows to have passed. Do not propose it otherwise.
 6. `fork` proposals must have a specific, minimal `allowed_change`.
 7. `kill` must include specific evidence from the scorecard.
-8. `stable` is only appropriate when no improvement path is visible.
+8. For `kill` verdicts: propose `fork` ONLY if the candidate materially
+   improved at least one of rolling12m, fee@10bp, or max drawdown vs the
+   closest prior candidate. If metrics are identical or worse, propose `kill`.
+9. `stable` is only appropriate when no improvement path is visible.
 9. If you cannot determine an action, output: `{"action": "create", "source_candidate_id": "baseline", "target_family": "channel_breakout", "rationale": "Cannot determine next step from available data."}`

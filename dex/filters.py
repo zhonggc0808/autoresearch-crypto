@@ -111,7 +111,9 @@ def apply_volatility_gate(
         sig = raw
 
         # Determine if volatility gate should block entry
-        if action == "block_entries_when_high_vol":
+        if action in ("block_entries_when_high_vol",
+                      "block_long_entries_when_high_vol",
+                      "block_short_entries_when_high_vol"):
             blocked = atr_ratio[i] > threshold
         elif action == "block_entries_when_low_vol":
             blocked = atr_ratio[i] < threshold
