@@ -249,6 +249,15 @@ def evaluate_stage_1300d(
         oracle_result = _run_oracle_1300d(candidate_path)
     except Exception as e:
         print(f"[ERROR] 1300d oracle failed: {e}")
+        evaluation_state["final_verdict"] = VERDICT_INVALID_ORACLE
+        evaluation_state["state"] = f"1300d_{VERDICT_INVALID_ORACLE}"
+        eval_entry = {
+            "stage": "1300d",
+            "verdict": VERDICT_INVALID_ORACLE,
+            "error": str(e),
+            "scorecard": None,
+        }
+        _append_history(evaluation_state, eval_entry)
         return VERDICT_INVALID_ORACLE, None
     elapsed = time.time() - t0
     print(f"  1300d oracle completed in {elapsed:.1f}s")

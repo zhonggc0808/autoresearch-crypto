@@ -679,7 +679,7 @@ def run_oracle(
         from dex.indicators import compute_adx
         adx_full, _, _ = compute_adx(df_full, 14)
         regimes_full = build_daily_regime_labels(df_full, fast_days=fast_days, slow_days=slow_days)
-        filter_fn = build_filter_from_config(_filter_config, adx_full, regimes_full)
+        filter_fn = build_filter_from_config(_filter_config, adx_full, regimes_full, df=df_full)
         signals_raw_full = filter_fn(signals_raw_full)
         signals_raw_is = signals_raw_full[:split_idx]
         signals_raw_oos = signals_raw_full[split_idx:]
