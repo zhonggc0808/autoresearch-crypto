@@ -9,6 +9,7 @@ from typing import Any, Mapping
 import torch
 
 from dex.strategies import (
+    AdaptiveChannelBreakoutTrendStrategy,
     AdaptiveHybridStrategy,
     ChannelBreakoutTrendStrategy,
     GridStrategy,
@@ -27,6 +28,8 @@ from dex.strategy_signals import generate_strategy_signals as generate_strategy_
 STRATEGY_ALIASES: dict[str, type] = {
     "adaptive": AdaptiveHybridStrategy,
     "adaptivehybrid": AdaptiveHybridStrategy,
+    "adaptive_channel_breakout": AdaptiveChannelBreakoutTrendStrategy,
+    "adaptive_channel": AdaptiveChannelBreakoutTrendStrategy,
     "bollinger_trend_filter": TrendStrategy,
     "channel_breakout": ChannelBreakoutTrendStrategy,
     "channel_breakout_trend": ChannelBreakoutTrendStrategy,
