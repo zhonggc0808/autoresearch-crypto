@@ -64,6 +64,7 @@ from dex.regime_permissions import (
     compute_daily_indicators,
     route_regime_signals,
 )
+from dex.filters import build_filter_from_config
 from dex.strategies.base import StrategyEvaluator
 from dex.strategies.channel_breakout import ChannelBreakoutTrendStrategy
 from dex.strategy_signals import generate_strategy_signals
@@ -602,6 +603,7 @@ def run_oracle(
     This is the main entry point — it is pure logic with no side effects
     except for writing output files.
     """
+    _filter_config = None  # Phase 3B candidate-selectable filter (baseline=disabled)
     if use_baseline:
         # Load from frozen JSON params (committed to git)
         checkpoint = _load_baseline_params()
@@ -637,6 +639,8 @@ def run_oracle(
         is_v21 = _is_v21_checkpoint(checkpoint)
         checkpoint_hash = _file_hash(cpath)
         _is_frozen_baseline = False
+        # Extract optional filter config (Phase 3B)
+        _filter_config = raw.get("filter") if isinstance(raw, dict) else None
     else:
         raise ValueError("Either --checkpoint, --baseline, or --candidate is required")
 
@@ -662,6 +666,16 @@ def run_oracle(
     # Split signals for IS/OOS
     signals_raw_is = signals_raw_full[:split_idx]
     signals_raw_oos = signals_raw_full[split_idx:]
+
+    # --- Phase 3B: candidate-selectable filter ---
+    if _filter_config is not None:
+        from dex.indicators import compute_adx
+        adx_full, _, _ = compute_adx(df_full, 14)
+        regimes_full = build_daily_regime_labels(df_full, fast_days=50, slow_days=200)
+        filter_fn = build_filter_from_config(_filter_config, adx_full, regimes_full)
+        signals_raw_full = filter_fn(signals_raw_full)
+        signals_raw_is = signals_raw_full[:split_idx]
+        signals_raw_oos = signals_raw_full[split_idx:]
 
     # --- Pre-compute regimes on FULL data (EMA50/200 warmup on df_full) ---
     regimes_full = build_daily_regime_labels(df_full, fast_days=50, slow_days=200)
