@@ -1,0 +1,14 @@
+{
+  "experiment_id": "exp_0015_ema20_100",
+  "parent_id": "exp_0015",
+  "candidate_role": "standalone",
+  "description": "BEAR-only with EMA 20/100 regime filter.",
+  "params": {
+    "strategy_type": "regime_permission_channel_breakout",
+    "regime_change_policy": "permission_based",
+    "regime_filter": { "fast_days": 20, "slow_days": 100 },
+    "bull": { "candidate": "flat", "strategy_params": { "entry_lookback": 375, "min_hold_bars": 432, "enable_long": true, "enable_short": false }, "permission": { "allow_long": false, "allow_short": false } },
+    "bear": { "candidate": "K0_base", "strategy_params": { "entry_lookback": 375, "min_hold_bars": 432, "enable_long": true, "enable_short": true }, "permission": { "allow_long": true, "allow_short": true } },
+    "neutral": { "candidate": "flat", "strategy_params": { "entry_lookback": 375, "min_hold_bars": 432, "enable_long": true, "enable_short": true }, "permission": { "allow_long": false, "allow_short": false } }
+  }
+}
