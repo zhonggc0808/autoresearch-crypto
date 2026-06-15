@@ -56,19 +56,67 @@ For standard candidate (role=standalone):
 ```
 
 For filter/overlay candidate (applies a structural guard on top of the base strategy):
+
 ```json
 {
-  "parent_id": "channel_breakout_v2_1_balanced",
-  "description": "One-line summary",
-  "hypothesis": "Clear statement.",
-  "expected_behavior_change": "What metric change is expected.",
-  "params": { ... base strategy params ... },
+  "strategy": "channel_breakout",
+  "candidate_role": "filter",
+  "base": "channel_breakout_v2_1_balanced",
+  "status": "research_only",
+  "hypothesis": "Volatility gate blocks entries during high-ATR periods, reducing drawdown in turbulent regimes.",
+  "params": {
+    "strategy_type": "regime_permission_channel_breakout",
+    "regime_change_policy": "permission_based",
+    "regime_filter": {
+      "fast_days": 50,
+      "slow_days": 200
+    },
+    "bull": {
+      "candidate": "v2_1_bull",
+      "strategy_params": {
+        "entry_lookback": 375,
+        "min_hold_bars": 432,
+        "enable_long": true,
+        "enable_short": false
+      },
+      "permission": {
+        "allow_long": true,
+        "allow_short": false
+      }
+    },
+    "bear": {
+      "candidate": "v2_1_bear",
+      "strategy_params": {
+        "entry_lookback": 375,
+        "min_hold_bars": 432,
+        "enable_long": true,
+        "enable_short": true
+      },
+      "permission": {
+        "allow_long": true,
+        "allow_short": true
+      }
+    },
+    "neutral": {
+      "candidate": "v2_1_neutral",
+      "strategy_params": {
+        "entry_lookback": 375,
+        "min_hold_bars": 432,
+        "enable_long": true,
+        "enable_short": true
+      },
+      "permission": {
+        "allow_long": true,
+        "allow_short": true
+      }
+    }
+  },
   "filter": {
     "family": "volatility_gate",
     "metric": "atr_close_ratio",
     "threshold": 0.06,
-    "action": "block_entries_when_high_vol",
-    "lookback": 48
+    "lookback": 48,
+    "action": "block_entries_when_high_vol"
   }
 }
 ```
@@ -76,8 +124,10 @@ For filter/overlay candidate (applies a structural guard on top of the base stra
 When you include a ``filter`` block, candidate_role is automatically set to
 "filter". The filter is applied on top of the base strategy in ``params``.
 
-Supported filter families:
-- volatility_gate: blocks entries when volatility exceeds threshold
+**CRITICAL: Never output flat params such as params.entry_lookback or
+params.min_hold_bars.** All channel_breakout params MUST use the
+regime_permission_channel_breakout structure with full bull/bear/neutral
+blocks as shown above.
 
 ## Rules
 
