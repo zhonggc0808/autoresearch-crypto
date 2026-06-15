@@ -185,13 +185,13 @@ drawdown_guard, or cooldown_filter.
     high-vol blocking. This family is closed until a new mechanism
     explains how it would avoid the fee-vs-rolling tradeoff.
 
-11. **NEXT direction: neutral regime filter.**
-    Worst 12m rolling window shifted from BEAR/NEUTRAL to NEUTRAL-dominant
-    (66.1%) under the p97 gate. Target neutral-regime entry quality:
-    - block entries when regime is NEUTRAL (regime-based, not volatility)
-    - block neutral entries only when prior trend is flat or down
-    - reduce neutral exposure without blocking all neutral trades
-    Use filter interface — no channel_breakout param tweaks.
+11. **NEUTRAL regime block: FAILED (exp_0053).**
+    Blocking ALL entries during NEUTRAL is too aggressive:
+    77,593 entries blocked (34k long + 43k short) across 102k neutral bars.
+    OOS safe halved (+200% → +100%), rolling12m worsened (-16% → -27%),
+    IS DD broke -50%. Fee improvement does not justify OOS/rolling damage.
+    Do NOT propose neutral_regime_entry_block in any form —
+    this family is closed.
 
 12. **Correlation constraint:** target corr_vs_baseline < 0.85.
 
