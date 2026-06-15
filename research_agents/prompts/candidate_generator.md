@@ -133,6 +133,18 @@ blocks as shown above.
 - `volatility_gate`
 - `cooldown_after_drawdown`
 
+Cooldown template:
+```json
+"filter": {
+  "family": "cooldown_after_drawdown",
+  "metric": "close_drawdown",
+  "lookback": 504,
+  "threshold": 0.15,
+  "cooldown_bars": 288,
+  "action": "block_entries_during_cooldown"
+}
+```
+
 Do NOT invent aliases such as drawdown_cooldown, dd_cooldown,
 drawdown_guard, or cooldown_filter.
 

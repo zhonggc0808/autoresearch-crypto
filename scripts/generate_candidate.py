@@ -239,6 +239,52 @@ def _parse_llm_response(response_text: str) -> Optional[Dict[str, Any]]:
 # Candidate building
 # ---------------------------------------------------------------------------
 
+# Filter field normalization — maps LLM near-synonyms to canonical values
+_COOLDOWN_METRIC_ALIASES: Dict[str, str] = {
+    "rolling_drawdown": "close_drawdown",
+    "drawdown": "close_drawdown",
+    "price_drawdown": "close_drawdown",
+    "peak_to_trough": "close_drawdown",
+}
+_COOLDOWN_ACTION_ALIASES: Dict[str, str] = {
+    "block_entries_when_drawdown_exceeded": "block_entries_during_cooldown",
+    "pause_entries_after_drawdown": "block_entries_during_cooldown",
+    "block_new_entries_during_drawdown": "block_entries_during_cooldown",
+    "cooldown": "block_entries_during_cooldown",
+}
+
+
+def _normalize_filter_fields(flt: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize LLM-invented filter field values to canonical schema values.
+
+    LLMs often use natural-language near-synonyms for enum values.
+    This fixes them before validation so the LLM doesn't need to
+    know exact enum strings.
+    """
+    fam = flt.get("family", "")
+
+    if fam in ("cooldown_after_drawdown", "drawdown_cooldown",
+               "dd_cooldown", "drawdown_guard", "cooldown_filter"):
+        flt["family"] = "cooldown_after_drawdown"
+
+        metric = flt.get("metric", "")
+        if metric in _COOLDOWN_METRIC_ALIASES:
+            flt["metric"] = _COOLDOWN_METRIC_ALIASES[metric]
+        elif metric not in ("close_drawdown",):
+            flt["metric"] = "close_drawdown"
+
+        action = flt.get("action", "")
+        if action in _COOLDOWN_ACTION_ALIASES:
+            flt["action"] = _COOLDOWN_ACTION_ALIASES[action]
+        elif action not in ("block_entries_during_cooldown",):
+            flt["action"] = "block_entries_during_cooldown"
+
+        flt.setdefault("cooldown_bars", max(flt.get("lookback", 288), 288))
+        if flt.get("lookback", 0) < 288:
+            flt["lookback"] = 288
+
+    return flt
+
 
 def _build_full_candidate(
     experiment_id: str,
@@ -272,7 +318,7 @@ def _build_full_candidate(
 
     # Copy filter if provided — auto-set candidate_role to filter
     if "filter" in llm_proposal:
-        candidate["filter"] = llm_proposal["filter"]
+        candidate["filter"] = _normalize_filter_fields(llm_proposal["filter"])
         candidate["candidate_role"] = "filter"
 
     return candidate
