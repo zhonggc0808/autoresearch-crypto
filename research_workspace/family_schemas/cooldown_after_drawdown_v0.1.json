@@ -1,0 +1,40 @@
+{
+  "type": "object",
+  "description": "Drawdown cooldown filter — blocks entries when close drawdown exceeds threshold",
+  "required": ["family", "metric", "threshold", "lookback", "cooldown_bars", "action"],
+  "properties": {
+    "family": {
+      "const": "cooldown_after_drawdown",
+      "description": "Filter family identifier"
+    },
+    "metric": {
+      "type": "string",
+      "enum": ["close_drawdown"],
+      "description": "Drawdown metric"
+    },
+    "threshold": {
+      "type": "number",
+      "minimum": 0.05,
+      "maximum": 0.30,
+      "description": "Drawdown threshold to trigger cooldown (e.g. 0.15 = 15% DD)"
+    },
+    "lookback": {
+      "type": "integer",
+      "minimum": 288,
+      "maximum": 4032,
+      "description": "Lookback bars for computing the rolling high-water mark"
+    },
+    "cooldown_bars": {
+      "type": "integer",
+      "minimum": 24,
+      "maximum": 576,
+      "description": "Number of bars to block entries after DD breach"
+    },
+    "action": {
+      "type": "string",
+      "enum": ["block_entries_during_cooldown"],
+      "description": "What the gate does during cooldown"
+    }
+  },
+  "additionalProperties": false
+}

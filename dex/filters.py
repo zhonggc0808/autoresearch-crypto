@@ -168,6 +168,96 @@ def compute_atr_close_ratio(
     return atr / close
 
 
+def compute_close_drawdown(
+    close: np.ndarray,
+    lookback: int = 2016,
+) -> np.ndarray:
+    """Compute rolling drawdown from close price peak.
+
+    Returns an array of drawdown ratios [0, 1) per bar,
+    where higher = deeper drawdown.
+
+    Args:
+        close: Array of close prices.
+        lookback: Rolling window for the peak (bars).
+
+    Returns:
+        Drawdown ratio array, same length as close.
+    """
+    n = len(close)
+    peak = np.zeros(n)
+    dd = np.zeros(n)
+
+    running_max = close[0]
+    for i in range(n):
+        if close[i] > running_max:
+            running_max = close[i]
+        # Rolling window: reset peak lookback
+        if i >= lookback:
+            rolling_max = np.max(close[i - lookback + 1 : i + 1])
+            running_max = max(running_max, rolling_max)
+        peak[i] = running_max
+        dd[i] = 1.0 - close[i] / running_max
+
+    return dd
+
+
+def apply_cooldown_after_drawdown(
+    signals: np.ndarray,
+    drawdown: np.ndarray,
+    threshold: float = 0.15,
+    cooldown_bars: int = 288,
+) -> np.ndarray:
+    """Block new entries after a drawdown breach, with cooldown.
+
+    When drawdown exceeds threshold, a cooldown window starts.
+    During cooldown, new entries are blocked. Existing positions
+    are untouched.
+
+    Args:
+        signals: Raw strategy signals.
+        drawdown: Drawdown ratio array.
+        threshold: DD ratio to trigger cooldown.
+        cooldown_bars: Cooldown duration.
+
+    Returns:
+        Modified signals with entries blocked during cooldown.
+    """
+    if threshold <= 0:
+        return signals
+
+    out = signals.copy()
+    position = 0
+    cooldown_remaining = 0
+
+    for i in range(len(out)):
+        raw = int(out[i])
+        sig = raw
+
+        # Enter cooldown if DD breaches threshold
+        if drawdown[i] >= threshold:
+            cooldown_remaining = cooldown_bars
+
+        # During cooldown, block new entries only
+        if cooldown_remaining > 0:
+            if sig == 2 and position != 1:
+                sig = 1
+            elif sig == 3 and position != -1:
+                sig = 1
+            cooldown_remaining -= 1
+
+        out[i] = sig
+
+        if sig == 2:
+            position = 1
+        elif sig == 3:
+            position = -1
+        elif sig == 0:
+            position = 0
+
+    return out
+
+
 def build_filter_from_config(
     config: Dict[str, Any],
     adx: np.ndarray,
@@ -222,7 +312,23 @@ def build_filter_from_config(
             # No OHLC data available — passthrough
             return lambda s: s
 
+    if filter_type == "cooldown_after_drawdown":
+        threshold = config.get("threshold", 0.15)
+        lookback = config.get("lookback", 2016)
+        cooldown_bars = config.get("cooldown_bars", 288)
+        action = config.get("action", "block_entries_during_cooldown")
+        metric = config.get("metric", "close_drawdown")
+
+        if df is not None and metric == "close_drawdown":
+            close = df["close"].values.astype(float)
+            dd = compute_close_drawdown(close, lookback=lookback)
+            return lambda s: apply_cooldown_after_drawdown(
+                s, dd, threshold=threshold, cooldown_bars=cooldown_bars,
+            )
+        else:
+            return lambda s: s
+
     raise ValueError(
         f"Unknown filter type: {filter_type!r}. "
-        f"Supported types: adx_gate, volatility_gate"
+        f"Supported types: adx_gate, volatility_gate, cooldown_after_drawdown"
     )

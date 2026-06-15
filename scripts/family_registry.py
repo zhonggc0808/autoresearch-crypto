@@ -309,6 +309,32 @@ VOLATILITY_GATE = FamilyDefinition(
 )
 
 
+COOLDOWN_AFTER_DRAWDOWN = FamilyDefinition(
+    name="cooldown_after_drawdown",
+    description="Drawdown cooldown — blocks new entries when price drawdown exceeds threshold",
+    schema_file="cooldown_after_drawdown_v0.1.json",
+    strategy_type="cooldown_after_drawdown_filter",
+    strategy_params={
+        "metric": ParamDef(str, enum=["close_drawdown"]),
+        "threshold": ParamDef(float, 0.05, 0.30),
+        "lookback": ParamDef(int, 288, 4032),
+        "cooldown_bars": ParamDef(int, 24, 576),
+        "action": ParamDef(str, enum=["block_entries_during_cooldown"]),
+    },
+    allowed_change={},
+    allowed_change_nested={},
+    search_space_text=(
+        "cooldown_after_drawdown filter: blocks entries when drawdown > threshold\n"
+        "metric: close_drawdown\n"
+        "threshold: [0.05, 0.30], default 0.15\n"
+        "lookback: [288, 4032], default 2016\n"
+        "cooldown_bars: [24, 576], default 288\n"
+        "action: block_entries_during_cooldown"
+    ),
+    extra_fields=[],
+)
+
+
 # ---------------------------------------------------------------------------
 # Initialize
 # ---------------------------------------------------------------------------
@@ -317,3 +343,4 @@ register(CHANNEL_BREAKOUT)
 register(VOLATILITY_FILTERED_BREAKOUT)
 register(EXIT_LOGIC_VARIANT)
 register(VOLATILITY_GATE)
+register(COOLDOWN_AFTER_DRAWDOWN)
