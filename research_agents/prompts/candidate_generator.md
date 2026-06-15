@@ -177,13 +177,21 @@ drawdown_guard, or cooldown_filter.
    or entry blocking conditional on market state.
    A regime_filter-only change does not count.
 
-10. **ATR/close ratio calibration (ETH 5m, lookback 48).**
-    p90=0.0039, p95=0.0047, p97=0.0053, p99=0.0069, max=0.030.
-    threshold must be in [0.003, 0.007]. Below 0.003 is too wide; above 0.01 is no-op.
-    Default: 0.0047 (p95).
+10. **volatility_gate family: PAUSED (exp_0050/51/52 threshold sweep).**
+    Calibrated thresholds p95/p97/p99 all failed:
+    - fee improves, but rolling12m and OOS return always worsen.
+    - No threshold avoids this tradeoff.
+    Do NOT propose volatility_gate, ATR/close gates, or directional
+    high-vol blocking. This family is closed until a new mechanism
+    explains how it would avoid the fee-vs-rolling tradeoff.
 
-11. Allowed action: block_short_entries_when_high_vol only.
-    Do NOT test block_long or broad block — already verified no-op.
+11. **NEXT direction: neutral regime filter.**
+    Worst 12m rolling window shifted from BEAR/NEUTRAL to NEUTRAL-dominant
+    (66.1%) under the p97 gate. Target neutral-regime entry quality:
+    - block entries when regime is NEUTRAL (regime-based, not volatility)
+    - block neutral entries only when prior trend is flat or down
+    - reduce neutral exposure without blocking all neutral trades
+    Use filter interface — no channel_breakout param tweaks.
 
 12. **Correlation constraint:** target corr_vs_baseline < 0.85.
 
