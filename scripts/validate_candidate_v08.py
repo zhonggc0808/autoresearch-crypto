@@ -20,13 +20,15 @@ from typing import Any, Dict, List, Optional
 
 import jsonschema
 
-from scripts.family_registry import get as _get_family, is_valid as _valid_family, list_families
+from scripts.family_registry import get as _get_family
+from scripts.family_registry import is_valid as _valid_family
+from scripts.family_registry import list_families
+from scripts.validate_candidate_v02 import (
+    print_errors as _print_errors,
+)
 from scripts.validate_candidate_v02 import (
     validate_candidate as _validate_v02_common,
-    print_errors as _print_errors,
-    FORBIDDEN_PATTERNS,
 )
-import re
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 SCHEMAS_DIR = PROJECT_DIR / "research_workspace" / "family_schemas"
@@ -47,9 +49,7 @@ def validate_candidate(
     # --- Determine family ---
     family = spec.get("strategy", "")
     if not _valid_family(family):
-        errors.append(
-            f"Unknown strategy '{family}'. Registered: {list_families()}"
-        )
+        errors.append(f"Unknown strategy '{family}'. Registered: {list_families()}")
         return errors  # cannot validate further without known family
 
     fd = _get_family(family)
@@ -87,14 +87,61 @@ def validate_candidate(
             f"expected '{expected_st}', got '{st}'"
         )
 
-    # --- Phase 3: Common v0.2 rules ---
+    # --- Phase 3: Filter/overlay validation ---
+    role = spec.get("candidate_role", "standalone")
+    flt = spec.get("filter")
+    if flt is not None:
+        if role not in ("filter", "overlay", "standalone"):
+            errors.append(
+                f"candidate_role '{role}' requires filter field: "
+                f"expected 'filter' or 'overlay' or 'standalone'"
+            )
+        if not isinstance(flt, dict):
+            errors.append("'filter' must be a dict")
+        else:
+            _validate_filter_block(flt, errors)
+
+    # --- Phase 4: Common v0.2 rules ---
     common_errors = _validate_v02_common(
-        spec, current_path=current_path,
+        spec,
+        current_path=current_path,
         check_uniqueness=check_uniqueness,
     )
     errors.extend(common_errors)
 
     return errors
+
+
+def _validate_filter_block(flt: Dict[str, Any], errors: List[str]) -> None:
+    """Validate the filter block structure."""
+    fam = flt.get("family", "")
+    if not fam:
+        errors.append("filter.family is required")
+        return
+
+    if not _valid_family(fam):
+        errors.append(f"Unknown filter family '{fam}'. Registered: {list_families()}")
+        return
+
+    fd = _get_family(fam)
+    schema_path = SCHEMAS_DIR / fd.schema_file
+    if not schema_path.exists():
+        errors.append(f"Filter schema not found: {schema_path}")
+        return
+
+    try:
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, IOError) as e:
+        errors.append(f"Cannot load filter schema {schema_path}: {e}")
+        return
+
+    import jsonschema
+
+    validator = jsonschema.Draft7Validator(schema)
+    for e in validator.iter_errors(flt):
+        path = ".".join(str(p) for p in e.absolute_path) if e.absolute_path else "filter"
+        msg = e.message.replace("\n", " ")
+        errors.append(f"[schema] {path}: {msg}")
 
 
 # ---------------------------------------------------------------------------
@@ -103,15 +150,17 @@ def validate_candidate(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Candidate spec validator v0.8 (multi-family)"
-    )
+    parser = argparse.ArgumentParser(description="Candidate spec validator v0.8 (multi-family)")
     parser.add_argument(
-        "--candidate", type=str, required=True,
+        "--candidate",
+        type=str,
+        required=True,
         help="Path to candidate spec JSON file",
     )
     parser.add_argument(
-        "--verbose", "-v", action="store_true",
+        "--verbose",
+        "-v",
+        action="store_true",
     )
     args = parser.parse_args()
 

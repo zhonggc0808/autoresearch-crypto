@@ -38,7 +38,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 if str(PROJECT_DIR) not in sys.path:
@@ -49,7 +49,7 @@ if str(PROJECT_DIR) not in sys.path:
 # ---------------------------------------------------------------------------
 
 from scripts.llm_client import call_llm
-from scripts.validate_candidate_v02 import validate_candidate, CANDIDATE_DIRS
+from scripts.validate_candidate_v02 import validate_candidate
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -98,9 +98,11 @@ def _resolve_strategy_from_params(params: Dict[str, Any]) -> str:
 def _list_families_from_registry() -> list:
     try:
         from scripts.family_registry import list_families
+
         return list_families()
     except Exception:
         return ["channel_breakout"]
+
 
 # ---------------------------------------------------------------------------
 # Context builder
@@ -180,12 +182,12 @@ def build_context(
 
     # Get search space from family registry
     from scripts.family_registry import search_space_summary
+
     search_space = search_space_summary(family)
 
     # Inject template variables
     context = (
-        template
-        .replace("{{EXPERIMENT_ID}}", experiment_id)
+        template.replace("{{EXPERIMENT_ID}}", experiment_id)
         .replace("{{PARENT_ID}}", parent_id)
         .replace("{{RECENT_RESULTS}}", recent)
         .replace("{{SEARCH_SPACE}}", search_space)
@@ -207,9 +209,7 @@ def _parse_llm_response(response_text: str) -> Optional[Dict[str, Any]]:
     text = response_text.strip()
 
     # Try to extract JSON from markdown code fences
-    json_match = re.search(
-        r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL
-    )
+    json_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
     if json_match:
         text = json_match.group(1).strip()
 
@@ -222,7 +222,7 @@ def _parse_llm_response(response_text: str) -> Optional[Dict[str, Any]]:
         brace_end = text.rfind("}")
         if brace_start >= 0 and brace_end > brace_start:
             try:
-                parsed = json.loads(text[brace_start:brace_end + 1])
+                parsed = json.loads(text[brace_start : brace_end + 1])
             except json.JSONDecodeError:
                 return None
         else:
@@ -253,8 +253,7 @@ def _build_full_candidate(
     candidate["strategy"] = _resolve_strategy_from_params(params)
 
     # Copy fields from LLM proposal
-    for key in ("parent_id", "description", "hypothesis",
-                "expected_behavior_change"):
+    for key in ("parent_id", "description", "hypothesis", "expected_behavior_change"):
         if key in llm_proposal:
             candidate[key] = llm_proposal[key]
 
@@ -266,9 +265,10 @@ def _build_full_candidate(
     if "execution" in llm_proposal:
         candidate["execution"] = llm_proposal["execution"]
 
-    # Copy filter if provided
+    # Copy filter if provided — auto-set candidate_role to filter
     if "filter" in llm_proposal:
         candidate["filter"] = llm_proposal["filter"]
+        candidate["candidate_role"] = "filter"
 
     return candidate
 
@@ -287,8 +287,9 @@ def _write_candidate(candidate: Dict[str, Any]) -> Path:
     return path
 
 
-def _write_rejected(proposal: Dict[str, Any], reason: str,
-                    llm_response: Optional[str] = None) -> Path:
+def _write_rejected(
+    proposal: Dict[str, Any], reason: str, llm_response: Optional[str] = None
+) -> Path:
     """Write a rejected proposal to proposals/rejected_*.json."""
     PROPOSALS_DIR.mkdir(parents=True, exist_ok=True)
     eid = proposal.get("experiment_id", "unknown")
@@ -339,10 +340,10 @@ def generate_candidate(
         "llm_response": None,
     }
 
-    print(f"\n{'='*60}")
-    print(f"  LLM Candidate Generator v0.4")
+    print(f"\n{'=' * 60}")
+    print("  LLM Candidate Generator v0.4")
     print(f"  Experiment ID: {experiment_id}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     # --- Build context ---
     print("\n[Step 1] Building context ...")
@@ -354,13 +355,13 @@ def generate_candidate(
 
     if dry_run:
         print("  (dry-run: printing context, skipping LLM call)")
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print("  CONTEXT (sent to LLM):")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
         print(context[:2000] + ("\n  ... (truncated)" if len(context) > 2000 else ""))
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print("  Expected output: valid candidate JSON with experiment_id injection")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
         result["status"] = "dry_run"
         return result
 
@@ -418,7 +419,9 @@ def generate_candidate(
     # --- Validate ---
     print("\n[Step 5] Validating candidate ...")
     validation_errors = validate_candidate(
-        candidate, current_path=None, check_uniqueness=True,
+        candidate,
+        current_path=None,
+        check_uniqueness=True,
     )
     if validation_errors:
         print(f"  [FAIL] {len(validation_errors)} validation error(s):")
@@ -427,7 +430,9 @@ def generate_candidate(
         result["status"] = "rejected"
         result["errors"] = validation_errors
         rejected_path = _write_rejected(
-            candidate, "; ".join(validation_errors), llm_response=response,
+            candidate,
+            "; ".join(validation_errors),
+            llm_response=response,
         )
         print(f"  Rejected proposal: {rejected_path}")
         return result
@@ -446,6 +451,7 @@ def generate_candidate(
         print("\n[Step 7] Evaluating candidate (--evaluate-after-generate) ...")
         try:
             from scripts.build_candidate_from_spec import _run_oracle
+
             or_result = _run_oracle(candidate_path)
             status = or_result.get("flags", {}).get("status", "?")
             print(f"  Oracle status: {status}")
@@ -461,27 +467,33 @@ def generate_candidate(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="LLM Candidate Generator v0.4"
-    )
+    parser = argparse.ArgumentParser(description="LLM Candidate Generator v0.4")
     parser.add_argument(
-        "--experiment-id", type=str, default=None,
+        "--experiment-id",
+        type=str,
+        default=None,
         help="Force a specific experiment ID (default: auto-assign)",
     )
     parser.add_argument(
-        "--parent-id", type=str, default="channel_breakout_v2_1_balanced",
+        "--parent-id",
+        type=str,
+        default="channel_breakout_v2_1_balanced",
         help="Parent experiment ID (default: baseline)",
     )
     parser.add_argument(
-        "--evaluate-after-generate", action="store_true",
+        "--evaluate-after-generate",
+        action="store_true",
         help="Run oracle evaluation after candidate is accepted (default: off)",
     )
     parser.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Print context and planned actions, skip LLM call and writes",
     )
     parser.add_argument(
-        "--context-file", type=str, default=None,
+        "--context-file",
+        type=str,
+        default=None,
         help="Use custom context from file instead of auto-building",
     )
     args = parser.parse_args()
@@ -504,19 +516,19 @@ def main():
     )
 
     # Print summary
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     if result["status"] == "accepted":
-        print(f"  [OK] Candidate accepted:")
+        print("  [OK] Candidate accepted:")
         print(f"    ID:      {result['experiment_id']}")
         print(f"    Path:    {result['candidate_path']}")
         sys.exit(0)
     elif result["status"] == "rejected":
-        print(f"  [FAIL] Candidate rejected:")
+        print("  [FAIL] Candidate rejected:")
         for e in result["errors"]:
             print(f"    - {e}")
         sys.exit(1)
     elif result["status"] == "dry_run":
-        print(f"  [OK] Dry-run complete.")
+        print("  [OK] Dry-run complete.")
         sys.exit(0)
     else:
         print(f"  [ERROR] {result['errors']}")

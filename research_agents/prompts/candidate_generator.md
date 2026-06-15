@@ -44,37 +44,40 @@ baseline, with a clear hypothesis about the expected behavioral change.
 
 Output ONLY a valid JSON object. No markdown, no code fences, no explanations.
 
+For standard candidate (role=standalone):
 ```json
 {
   "parent_id": "channel_breakout_v2_1_balanced",
-  "description": "One-line summary of what this experiment tests",
-  "hypothesis": "Clear, falsifiable statement (min 20 chars). What parameter changes and why.",
-  "expected_behavior_change": "What specific metric change is expected (min 20 chars). E.g. 'Reduces trade count by ~15% by requiring stronger regime conviction.'",
-  "params": {
-    "strategy_type": "regime_permission_channel_breakout",
-    "regime_change_policy": "permission_based",
-    "regime_filter": {
-      "fast_days": 50,
-      "slow_days": 200
-    },
-    "bull": {
-      "candidate": "...",
-      "strategy_params": { "entry_lookback": 375, "min_hold_bars": 432, "enable_long": true, "enable_short": false },
-      "permission": { "allow_long": true, "allow_short": false, "close_below_ema_disables_long": true, "ema_fast": 50, "consecutive_below_ema_days": 3 }
-    },
-    "bear": {
-      "candidate": "...",
-      "strategy_params": { "entry_lookback": 375, "min_hold_bars": 432, "enable_long": true, "enable_short": true },
-      "permission": { "allow_long": true, "allow_short": true }
-    },
-    "neutral": {
-      "candidate": "...",
-      "strategy_params": { "entry_lookback": 375, "min_hold_bars": 432, "enable_long": true, "enable_short": true },
-      "permission": { "allow_long": true, "allow_short": true, "directional_only": true, "ema_fast": 50, "ema_slope_days": 5 }
-    }
+  "description": "One-line summary",
+  "hypothesis": "Clear statement (min 20 chars).",
+  "expected_behavior_change": "What metric change is expected (min 20 chars).",
+  "params": { ... }
+}
+```
+
+For filter/overlay candidate (applies a structural guard on top of the base strategy):
+```json
+{
+  "parent_id": "channel_breakout_v2_1_balanced",
+  "description": "One-line summary",
+  "hypothesis": "Clear statement.",
+  "expected_behavior_change": "What metric change is expected.",
+  "params": { ... base strategy params ... },
+  "filter": {
+    "family": "volatility_gate",
+    "metric": "atr_close_ratio",
+    "threshold": 0.06,
+    "action": "block_entries_when_high_vol",
+    "lookback": 48
   }
 }
 ```
+
+When you include a ``filter`` block, candidate_role is automatically set to
+"filter". The filter is applied on top of the base strategy in ``params``.
+
+Supported filter families:
+- volatility_gate: blocks entries when volatility exceeds threshold
 
 ## Rules
 

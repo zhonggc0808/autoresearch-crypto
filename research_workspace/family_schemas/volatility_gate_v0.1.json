@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "description": "Volatility gate filter parameters — applied on top of a base strategy",
+  "properties": {
+    "metric": {
+      "type": "string",
+      "enum": ["atr_close_ratio", "atr_pct", "bb_width", "keltner_width"],
+      "description": "Volatility metric to measure"
+    },
+    "threshold": {
+      "type": "number",
+      "minimum": 0.01,
+      "maximum": 0.20,
+      "description": "Threshold value for the metric to trigger the gate"
+    },
+    "action": {
+      "type": "string",
+      "enum": ["block_entries_when_high_vol", "block_entries_when_low_vol", "reduce_position_size"],
+      "description": "What the gate does when the threshold is breached"
+    },
+    "lookback": {
+      "type": "integer",
+      "minimum": 12,
+      "maximum": 288,
+      "description": "Lookback period (bars) for computing the volatility metric"
+    }
+  },
+  "required": ["metric", "threshold", "action", "lookback"],
+  "additionalProperties": false
+}

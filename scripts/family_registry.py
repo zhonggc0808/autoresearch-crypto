@@ -28,6 +28,7 @@ SCHEMAS_DIR = PROJECT_DIR / "research_workspace" / "family_schemas"
 @dataclass
 class ParamDef:
     """Definition of a single parameter's type and bounds."""
+
     type: type
     min: Optional[Any] = None
     max: Optional[Any] = None
@@ -37,14 +38,15 @@ class ParamDef:
 @dataclass
 class FamilyDefinition:
     """Complete definition of a strategy family."""
+
     name: str
     description: str
-    schema_file: str                    # filename in family_schemas/
-    strategy_type: str                  # value for params.strategy_type field
+    schema_file: str  # filename in family_schemas/
+    strategy_type: str  # value for params.strategy_type field
     strategy_params: Dict[str, ParamDef]
-    allowed_change: Dict[str, Any]      # flat keys + nested specs for fork validation
+    allowed_change: Dict[str, Any]  # flat keys + nested specs for fork validation
     allowed_change_nested: Dict[str, Dict[str, Any]]  # nested objects in allowed_change
-    search_space_text: str              # text for generator prompt
+    search_space_text: str  # text for generator prompt
     extra_fields: List[str] = field(default_factory=list)  # allowed extra top-level fields
 
 
@@ -162,9 +164,7 @@ def search_space_summary(family: Optional[str] = None) -> str:
     return "\n\n".join(parts)
 
 
-def validate_allowed_change(
-    family: str, ac: Dict[str, Any]
-) -> List[str]:
+def validate_allowed_change(family: str, ac: Dict[str, Any]) -> List[str]:
     """Validate an allowed_change dict for a specific family.
 
     This is the same logic used by review_candidate.py and execute_action.py.
@@ -213,9 +213,7 @@ def validate_allowed_change(
                 elif st == "str":
                     enum_vals = spec.get("enum")
                     if enum_vals and nv not in enum_vals:
-                        errors.append(
-                            f"allowed_change.{key}.{nk}: '{nv}' not in {enum_vals}"
-                        )
+                        errors.append(f"allowed_change.{key}.{nk}: '{nv}' not in {enum_vals}")
         # Check flat fields
         elif key in fd.allowed_change:
             spec = fd.allowed_change[key]
@@ -224,15 +222,13 @@ def validate_allowed_change(
                 errors.append(f"allowed_change.{key}: expected int")
             elif st == "int" and (value < spec.get("min", 0) or value > spec.get("max", 999999)):
                 errors.append(
-                    f"allowed_change.{key}: {value} out of range "
-                    f"[{spec['min']}, {spec['max']}]"
+                    f"allowed_change.{key}: {value} out of range [{spec['min']}, {spec['max']}]"
                 )
             elif st == "float" and not isinstance(value, (int, float)):
                 errors.append(f"allowed_change.{key}: expected number")
             elif st == "float" and (value < spec.get("min", 0) or value > spec.get("max", 999999)):
                 errors.append(
-                    f"allowed_change.{key}: {value} out of range "
-                    f"[{spec['min']}, {spec['max']}]"
+                    f"allowed_change.{key}: {value} out of range [{spec['min']}, {spec['max']}]"
                 )
         else:
             errors.append(f"allowed_change.{key}: unknown field for family '{family}'")
@@ -261,11 +257,11 @@ EXIT_LOGIC_VARIANT = FamilyDefinition(
             "slow_days": {"type": "int", "min": 10, "max": 500},
         },
         "exit_logic": {
-            "exit_lookback":   {"type": "int", "min": 12, "max": 1440},
-            "take_profit_pct":  {"type": "float", "min": 0.01, "max": 0.50},
-            "stop_loss_pct":    {"type": "float", "min": 0.01, "max": 0.30},
-            "max_hold_bars":    {"type": "int", "min": 12, "max": 2880},
-            "trailing_stop":    {"type": "bool"},
+            "exit_lookback": {"type": "int", "min": 12, "max": 1440},
+            "take_profit_pct": {"type": "float", "min": 0.01, "max": 0.50},
+            "stop_loss_pct": {"type": "float", "min": 0.01, "max": 0.30},
+            "max_hold_bars": {"type": "int", "min": 12, "max": 2880},
+            "trailing_stop": {"type": "bool"},
         },
     },
     search_space_text=(
@@ -282,6 +278,37 @@ EXIT_LOGIC_VARIANT = FamilyDefinition(
 )
 
 
+VOLATILITY_GATE = FamilyDefinition(
+    name="volatility_gate",
+    description="Volatility gate filter — blocks entries during high-volatility periods",
+    schema_file="volatility_gate_v0.1.json",
+    strategy_type="volatility_gate_filter",
+    strategy_params={
+        "metric": ParamDef(str, enum=["atr_close_ratio", "atr_pct", "bb_width", "keltner_width"]),
+        "threshold": ParamDef(float, 0.01, 0.20),
+        "action": ParamDef(
+            str,
+            enum=[
+                "block_entries_when_high_vol",
+                "block_entries_when_low_vol",
+                "reduce_position_size",
+            ],
+        ),
+        "lookback": ParamDef(int, 12, 288),
+    },
+    allowed_change={},
+    allowed_change_nested={},
+    search_space_text=(
+        "volatility_gate filter: applied on top of base strategy\n"
+        "metric: atr_close_ratio | atr_pct | bb_width | keltner_width\n"
+        "threshold: [0.01, 0.20], default 0.06\n"
+        "action: block_entries_when_high_vol | block_entries_when_low_vol | reduce_position_size\n"
+        "lookback: [12, 288], default 48"
+    ),
+    extra_fields=[],
+)
+
+
 # ---------------------------------------------------------------------------
 # Initialize
 # ---------------------------------------------------------------------------
@@ -289,3 +316,4 @@ EXIT_LOGIC_VARIANT = FamilyDefinition(
 register(CHANNEL_BREAKOUT)
 register(VOLATILITY_FILTERED_BREAKOUT)
 register(EXIT_LOGIC_VARIANT)
+register(VOLATILITY_GATE)
