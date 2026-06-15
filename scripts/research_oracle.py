@@ -480,9 +480,12 @@ def _print_filter_diag(filter_fn: callable) -> None:
     if not diag:
         return
     print(f"\n--- Filter Diagnostics ---")
-    for key in ("high_vol_bars", "attempted_long_entries", "attempted_short_entries",
+    for key in ("high_vol_bars", "neutral_bars",
+                "attempted_long_entries", "attempted_short_entries",
                 "blocked_long_entries", "blocked_short_entries", "signals_changed_total"):
-        print(f"  {key}: {diag.get(key, '?')}")
+        v = diag.get(key)
+        if v is not None:
+            print(f"  {key}: {v}")
 
 
 def _compute_execution_parity(

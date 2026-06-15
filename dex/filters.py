@@ -444,8 +444,6 @@ def build_filter_from_config(
         else:
             return lambda s: s
 
-    raise ValueError(
-        f"Unknown filter type: {filter_type!r}. "
     if filter_type == "neutral_regime_entry_block":
         action = config.get("action", "block_entries_when_neutral")
         filter_diag: Dict[str, Any] = {}
@@ -459,5 +457,4 @@ def build_filter_from_config(
     raise ValueError(
         f"Unknown filter type: {filter_type!r}. "
         f"Supported types: adx_gate, volatility_gate, cooldown_after_drawdown, neutral_regime_entry_block"
-    )
     )
