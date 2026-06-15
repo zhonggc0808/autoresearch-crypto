@@ -7,6 +7,7 @@ license = {text = "MIT"}
 requires-python = ">=3.10"
 dependencies = [
     "ccxt>=4.0.0",
+    "jsonschema>=4.26.0",
     "matplotlib>=3.10.8",
     "nado-protocol>=0.3.5",
     "numpy>=2.2.6",
