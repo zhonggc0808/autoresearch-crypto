@@ -241,7 +241,36 @@ def _load_scorecard_and_state(
 
 
 def _scorecard_from_evaluation_state(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Build a minimal scorecard from evaluation state when no scorecard file exists."""
+    """Build scorecard from evaluation state, reading oracle scorecard if available.
+
+    The evaluation state's history references an oracle run. The actual
+    scorecard is stored under the oracle ID, not the candidate's exp_NNNN ID.
+    This function finds and loads it, falling back to a minimal record only
+    when the oracle scorecard cannot be found.
+    """
+    # Try to find the oracle scorecard from history
+    history = state.get("history", [])
+    for entry in history:
+        oracle_id = entry.get("oracle_id")
+        stage = entry.get("stage", "1300d")
+        if oracle_id:
+            # Oracle scorecards are named oracle_*_scorecard.json, not exp_*_scorecard.json
+            sc_path = LLM_SCORECARDS_DIR / f"{oracle_id}_{stage}_scorecard.json"
+            if sc_path.exists():
+                try:
+                    return json.loads(sc_path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, IOError):
+                    pass
+
+            # Fallback: try with just stage (some scorecards omit stage in filename)
+            sc_path2 = LLM_SCORECARDS_DIR / f"{oracle_id}_scorecard.json"
+            if sc_path2.exists():
+                try:
+                    return json.loads(sc_path2.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, IOError):
+                    pass
+
+    # No oracle scorecard found — build minimal record
     return {
         "experiment_id": state.get("experiment_id", "?"),
         "stage": state.get("state", "unknown"),
@@ -541,6 +570,11 @@ def review_candidate(
         )
         print(f"  Rejected action: {rejected_path}")
         return result
+
+    # --- Force source_candidate_id to the original experiment_id ---
+    # The LLM may see the oracle scorecard ID and use it, but actions
+    # must reference the candidate ID (exp_NNNN), not the oracle run.
+    action["source_candidate_id"] = experiment_id
 
     proposed_action = action.get("action", "?")
     print(f"  Proposed action: {proposed_action}")
