@@ -1197,10 +1197,10 @@ def main():
                     log_message(f"[持仓同步] 检测到挂单已成交: 实际={actual_pos:.6f}")
                     state["position"] = pos_dir
                     state["strategy_size"] = abs(actual_pos)
-                    if state.get("entry_price", 0) == 0:
-                        state["entry_price"] = state.get(
-                            "pending_open_price", state.get("last_price", 0)
-                        )
+                    # 无条件覆盖 entry_price（flip 场景：旧方向被平仓后可能残留旧 entry）
+                    state["entry_price"] = state.get(
+                        "pending_open_price", state.get("last_price", 0)
+                    )
                     if state.get("entry_bar", 0) == 0:
                         state["entry_bar"] = state.get("bar_count", 0) - 1
                     # 同步 confirmed_entry

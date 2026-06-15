@@ -2053,6 +2053,7 @@ def main():
                         log_message(f"[持仓同步] 实际持仓=0, state={stale_pos} -> 重置状态")
                     state["position"] = 0
                     state["strategy_size"] = 0.0
+                    state["entry_price"] = 0.0
                     state["entry_bar"] = 0
                     state["tp_order_id"] = None
                     state["tp_price"] = 0.0
@@ -2067,10 +2068,10 @@ def main():
                         state["pending_open_is_flip"] = False
                     state["position"] = pos_dir
                     state["strategy_size"] = abs(actual_pos)
-                    if state.get("entry_price", 0) == 0:
-                        state["entry_price"] = state.get(
-                            "pending_open_price", state.get("last_price", 0)
-                        )
+                    # 无条件覆盖 entry_price（flip 场景：旧方向被平仓后可能残留旧 entry）
+                    state["entry_price"] = state.get(
+                        "pending_open_price", state.get("last_price", 0)
+                    )
                     if state.get("entry_bar", 0) == 0:
                         state["entry_bar"] = state.get("bar_count", 0) - 1
                     state["pending_open"] = False

@@ -218,7 +218,7 @@ Append to `tests/test_research_oracle.py` (before the `if __name__ == "__main__"
 
 ```python
 def test_v02_default_parity():
-    """v0.2 default 50/200 must reproduce v0.1.0 metrics and signal path exactly."""
+    """v0.2 default 50/200: metrics match v0.1.0 fixture, regime path stable under 50/200."""
     import hashlib
     import json
 
@@ -230,7 +230,7 @@ def test_v02_default_parity():
     # --- Run v0.2 oracle with defaults (50/200) ---
     result = research_oracle.run_oracle(checkpoint_path=CKPT, fast_days=50, slow_days=200)
 
-    # --- 1. OOS metrics parity (1e-8) ---
+    # --- 1. OOS metrics parity against v0.1.0 fixture (1e-8) ---
     for metric in ["return", "dd", "sharpe"]:
         v2_val = result["metrics"]["oos"]["raw"][metric]
         v1_val = v010["metrics"]["oos"]["raw"][metric]
@@ -458,17 +458,18 @@ def _compute_comparison(
         if default_result and (fd != 50 or sd != 200):
             _, _, _, dr = default_result
             key = f"{fd}_{sd}"
-            for m in ["oos_return", "oos_dd", "oos_sharpe"]:
-                v = r["metrics"]["oos"]["raw"][m]
-                dv = dr["metrics"]["oos"]["raw"][m]
+            METRIC_MAP = {"oos_return": "return", "oos_dd": "dd", "oos_sharpe": "sharpe"}
+            for display_key, raw_key in METRIC_MAP.items():
+                v = r["metrics"]["oos"]["raw"][raw_key]
+                dv = dr["metrics"]["oos"]["raw"][raw_key]
                 if isinstance(v, (int, float)) and isinstance(dv, (int, float)):
                     diff = v - dv
-                    if m in ("return",):
-                        metric_deltas.setdefault(m, {})[key] = _format_pct(diff)
-                    elif m == "dd":
-                        metric_deltas.setdefault(m, {})[key] = f"{diff * 100:+.2f}pp"
+                    if raw_key == "return":
+                        metric_deltas.setdefault(display_key, {})[key] = _format_pct(diff)
+                    elif raw_key == "dd":
+                        metric_deltas.setdefault(display_key, {})[key] = f"{diff * 100:+.2f}pp"
                     else:
-                        metric_deltas.setdefault(m, {})[key] = f"{diff:+.4f}"
+                        metric_deltas.setdefault(display_key, {})[key] = f"{diff:+.4f}"
 
         # Regime label distribution change vs default
         if default_result and (fd != 50 or sd != 200):
