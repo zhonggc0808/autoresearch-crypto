@@ -130,6 +130,7 @@ def load_state():
 
 
 def save_state(state):
+    state["last_update"] = datetime.now().isoformat()
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
@@ -1090,13 +1091,53 @@ def manage_tp_order(exchange, symbol, tick_sz, lot_sz, strategy, state):
     """
     管理止盈限价单 (Maker)。
     当持仓存在且无 TP 单时，自动挂止盈限价单。
+
+    Security: TP size is clamped to min(state.strategy_size, abs(actual_position))
+    to prevent 40804 "exceed held positions" errors when actual position
+    is smaller than strategy_size (e.g. after partial fill).
     """
     pos = state.get("position", 0)
     entry_price = state.get("entry_price", 0)
-    size = state.get("strategy_size", 0)
+    state_size = state.get("strategy_size", 0)
     tp_order_id = state.get("tp_order_id")
 
-    if pos == 0 or entry_price == 0 or size == 0:
+    if pos == 0 or entry_price == 0 or state_size == 0:
+        if tp_order_id:
+            try:
+                exchange.cancel_order(tp_order_id, symbol)
+            except Exception:
+                pass
+            state["tp_order_id"] = None
+            state["tp_price"] = 0.0
+            state["tp_side"] = None
+        return state
+
+    # 查询实际持仓，避免 state.strategy_size 与交易所不一致
+    try:
+        actual_pos = get_position(exchange, symbol)
+    except Exception as e:
+        log_message(f"[TP_SKIP_REASON] get_position失败: {e}")
+        return state
+
+    # 检查仓位方向一致
+    actual_dir = 1 if actual_pos > 0 else (-1 if actual_pos < 0 else 0)
+    if actual_dir != pos:
+        log_message(
+            f"[TP_SKIP_POSITION_MISMATCH] state_pos={pos} actual_pos={actual_pos:.6f}"
+        )
+        if tp_order_id:
+            try:
+                exchange.cancel_order(tp_order_id, symbol)
+            except Exception:
+                pass
+            state["tp_order_id"] = None
+            state["tp_price"] = 0.0
+            state["tp_side"] = None
+        return state
+
+    # 实际无仓位，清理 TP
+    if abs(actual_pos) < lot_sz * 0.5:
+        log_message(f"[TP_SKIP_NO_POSITION] state_size={state_size} actual={actual_pos:.6f}")
         if tp_order_id:
             try:
                 exchange.cancel_order(tp_order_id, symbol)
@@ -1108,13 +1149,11 @@ def manage_tp_order(exchange, symbol, tick_sz, lot_sz, strategy, state):
         return state
 
     # 计算止盈价格和方向
-    # v2.1: strategy is None, 不挂默认 TP; 只有 checkpoint 明确配置才挂
     if strategy is None:
         tp_pct = 0.0
     else:
         tp_pct = getattr(strategy, "take_profit_pct", 0.0)
     if tp_pct <= 0:
-        # TP <= 0 表示不挂 TP 单, 取消旧单后返回
         if state.get("tp_order_id"):
             try:
                 exchange.cancel_order(state["tp_order_id"], symbol)
@@ -1123,6 +1162,11 @@ def manage_tp_order(exchange, symbol, tick_sz, lot_sz, strategy, state):
             state["tp_order_id"] = None
             state["tp_price"] = 0.0
             state["tp_side"] = None
+        log_message(
+            f"[TP_SKIP_REASON] tp_pct={tp_pct} entry={entry_price} "
+            f"actual_pos={actual_pos:.6f} state_size={state_size} "
+            f"reason=TP_pct_0_or_unset"
+        )
         return state
     if pos == 1:
         tp_price = round_to_tick(entry_price * (1 + tp_pct), tick_sz)
@@ -1145,29 +1189,49 @@ def manage_tp_order(exchange, symbol, tick_sz, lot_sz, strategy, state):
             pass
         state["tp_order_id"] = None
 
-    # 对齐 size
-    order_size = round_to_size(size, lot_sz)
+    # 对齐 size: 取 state_size 和 actual_pos 的较小值，防止 40804
+    safe_size = min(state_size, abs(actual_pos))
+    order_size = round_to_size(safe_size, lot_sz)
     if order_size <= 0:
+        log_message(
+            f"[TP_SKIP_REASON] order_size=0 safe_size={safe_size:.6f} "
+            f"state_size={state_size} actual={abs(actual_pos):.6f}"
+        )
         return state
 
     # 挂止盈限价单 (Maker, reduce-only)
-    order_id = place_limit_order(
-        exchange,
-        symbol,
-        tp_side,
-        tp_pos_side,
-        order_size,
-        tp_price,
-        post_only=True,
-        reduce_only=True,
-    )
-    if order_id:
-        state["tp_order_id"] = order_id
-        state["tp_price"] = tp_price
-        state["tp_side"] = tp_side
-        log_message(
-            f"[TP挂单] {tp_side.upper()} {tp_pos_side} size={order_size:.8f} @ {tp_price:.2f} (入场={entry_price:.2f}, TP={tp_pct * 100:.1f}%)"
+    try:
+        order_id = place_limit_order(
+            exchange,
+            symbol,
+            tp_side,
+            tp_pos_side,
+            order_size,
+            tp_price,
+            post_only=True,
+            reduce_only=True,
         )
+        if order_id:
+            state["tp_order_id"] = order_id
+            state["tp_price"] = tp_price
+            state["tp_side"] = tp_side
+            log_message(
+                f"[TP挂单] {tp_side.upper()} {tp_pos_side} size={order_size:.8f} @ {tp_price:.2f} "
+                f"(入场={entry_price:.2f}, TP={tp_pct * 100:.1f}%)"
+            )
+    except Exception as e:
+        err_str = str(e)
+        if "40804" in err_str:
+            log_message(
+                f"[TP_SIZE_MISMATCH] exchange拒绝: size={order_size:.6f} "
+                f"actual={abs(actual_pos):.6f} state={state_size}. 跳过本轮TP."
+            )
+        else:
+            log_message(f"[TP_SKIP_REASON] 挂单异常: {e}")
+        # 不抛出异常，继续后续流程
+        state["tp_order_id"] = None
+        state["tp_price"] = 0.0
+        state["tp_side"] = None
 
     return state
 
