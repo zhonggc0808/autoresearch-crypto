@@ -82,6 +82,7 @@ def apply_volatility_gate(
     atr_ratio: np.ndarray,
     threshold: float = 0.06,
     action: str = "block_entries_when_high_vol",
+    diag: Optional[Dict[str, Any]] = None,
 ) -> np.ndarray:
     """Block new position entries when volatility metric exceeds threshold.
 
@@ -106,6 +107,15 @@ def apply_volatility_gate(
     out = signals.copy()
     position = 0
 
+    counters = {
+        "high_vol_bars": 0,
+        "attempted_long_entries": 0,
+        "attempted_short_entries": 0,
+        "blocked_long_entries": 0,
+        "blocked_short_entries": 0,
+        "signals_changed_total": 0,
+    }
+
     for i in range(len(out)):
         raw = int(out[i])
         sig = raw
@@ -123,18 +133,30 @@ def apply_volatility_gate(
             blocked = False
 
         if blocked:
+            counters["high_vol_bars"] += 1
+            if sig == 2 and position != 1:
+                counters["attempted_long_entries"] += 1
+            elif sig == 3 and position != -1:
+                counters["attempted_short_entries"] += 1
+
             if action == "block_short_entries_when_high_vol":
-                if sig == 3 and position != -1:  # only block new shorts
+                if sig == 3 and position != -1:
                     sig = 1
+                    counters["blocked_short_entries"] += 1
             elif action == "block_long_entries_when_high_vol":
-                if sig == 2 and position != 1:  # only block new longs
-                    sig = 1
-            else:
-                # block all new entries
                 if sig == 2 and position != 1:
                     sig = 1
+                    counters["blocked_long_entries"] += 1
+            else:
+                if sig == 2 and position != 1:
+                    sig = 1
+                    counters["blocked_long_entries"] += 1
                 elif sig == 3 and position != -1:
                     sig = 1
+                    counters["blocked_short_entries"] += 1
+
+        if sig != raw:
+            counters["signals_changed_total"] += 1
 
         out[i] = sig
 
@@ -144,6 +166,9 @@ def apply_volatility_gate(
             position = -1
         elif sig == 0:
             position = 0
+
+    if diag is not None:
+        diag.update(counters)
 
     return out
 
@@ -315,9 +340,15 @@ def build_filter_from_config(
                 df["close"].values.astype(float),
                 lookback=lookback,
             )
-            return lambda s: apply_volatility_gate(
-                s, atr_ratio, threshold=threshold, action=action,
-            )
+            # Capture diagnostics in a mutable dict so callers can inspect
+            filter_diag: Dict[str, Any] = {}
+            def _vg_fn(s: np.ndarray) -> np.ndarray:
+                return apply_volatility_gate(
+                    s, atr_ratio, threshold=threshold, action=action,
+                    diag=filter_diag,
+                )
+            _vg_fn.diag = filter_diag  # type: ignore[attr-defined]
+            return _vg_fn
         else:
             # No OHLC data available — passthrough
             return lambda s: s

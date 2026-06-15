@@ -470,6 +470,21 @@ def _compute_slippage_sensitivity(
     return result
 
 
+def _print_filter_diag(filter_fn: callable) -> None:
+    """Print filter attribution diagnostics if available.
+
+    The filter function may have a ``.diag`` dict attribute containing
+    counters like blocked entries, high-vol bars, etc.
+    """
+    diag = getattr(filter_fn, "diag", None)
+    if not diag:
+        return
+    print(f"\n--- Filter Diagnostics ---")
+    for key in ("high_vol_bars", "attempted_long_entries", "attempted_short_entries",
+                "blocked_long_entries", "blocked_short_entries", "signals_changed_total"):
+        print(f"  {key}: {diag.get(key, '?')}")
+
+
 def _compute_execution_parity(
     raw_signals: np.ndarray,
     safe_signals: np.ndarray,
@@ -681,6 +696,8 @@ def run_oracle(
         regimes_full = build_daily_regime_labels(df_full, fast_days=fast_days, slow_days=slow_days)
         filter_fn = build_filter_from_config(_filter_config, adx_full, regimes_full, df=df_full)
         signals_raw_full = filter_fn(signals_raw_full)
+        # --- Filter attribution diagnostics ---
+        _print_filter_diag(filter_fn)
         signals_raw_is = signals_raw_full[:split_idx]
         signals_raw_oos = signals_raw_full[split_idx:]
 
