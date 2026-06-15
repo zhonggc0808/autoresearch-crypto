@@ -89,27 +89,39 @@ Output ONLY a valid JSON object. No markdown, no code fences, no explanations.
 
 ## Generation Constraints (v1.0 — enforced by oracle gate)
 
-8. **Do NOT generate simple channel_breakout clones** that only tweak
-   `entry_lookback`, `exit_lookback`, or `min_hold_bars`. The candidate
-   must involve a meaningful structural change (different family,
-   filter/overlay, regime policy change, or at least 2+ coupled
-   parameter changes with a clear interaction hypothesis).
+8. **No channel_breakout-only parameter tweaks.**
+   Do NOT propose another candidate that only adjusts:
+   entry_lookback, exit_lookback, min_hold_bars,
+   fast_days, slow_days, EMA regime conditions,
+   or consecutive-day regime confirmation.
+   These have been tested repeatedly and all were killed
+   (ROLLING_NEGATIVE, DD_OVER_40). Pure regime_filter
+   variants cannot solve rolling window negative returns.
 
-9. **Correlation constraint:** The candidate must target
-   `corr_vs_baseline < 0.85` unless explicitly declared as a
-   filter/overlay type. If the design is expected to be highly
-   correlated with v2.1, state why that is acceptable.
+9. **If using channel_breakout, candidate_role must be filter or overlay.**
+   The proposal must include an explicit structural mechanism for
+   reducing drawdown or improving rolling 6m/12m windows, such as:
+   volatility gate, DD guard, exposure reduction, position sizing,
+   or entry blocking conditional on market state.
+   A regime_filter-only change does not count.
 
-10. **Rolling window improvement:** The candidate must include a
+10. **Do not treat action status as strategy success.**
+    executed_create or executed_fork mean the pipeline executed
+    correctly — they do NOT mean the strategy passed evaluation.
+    Only oracle PASS with clean promotion gates counts as success.
+
+11. **Correlation constraint:** The candidate must target
+    corr_vs_baseline < 0.85 unless explicitly declared as a
+    filter/overlay type.
+
+12. **Rolling window improvement:** The candidate must include a
     concrete mechanism intended to improve rolling 6m or 12m negative
-    return windows. State which regime or period the change targets
-    (e.g., "tightens stop logic in bear regimes to reduce 6m losses").
+    return windows.
 
-11. **Drawdown ceiling:** Avoid designs likely to produce IS or OOS
+13. **Drawdown ceiling:** Avoid designs likely to produce IS or OOS
     max drawdown worse than -30%. Any design expected to exceed -40%
     should be rejected during generation — do not submit it.
 
-12. **Turnover ceiling:** Expected trades/year must be < 1000,
-    preferably < 300. High-turnover strategies (exit_logic variants,
-    tight stops, frequent reversals) must explicitly explain why
-    turnover stays bounded.
+14. **Turnover ceiling:** Expected trades/year must be < 1000,
+    preferably < 300. High-turnover strategies must explicitly
+    explain why turnover stays bounded.
