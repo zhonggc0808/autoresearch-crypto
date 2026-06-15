@@ -910,8 +910,9 @@ def execute_trade(
                     "price": order_price,
                 }
             )
+            flip_close_sub_tag = " [FLIP_CLOSE_SUBMITTED]" if is_flip else ""
             log_message(
-                f"[{close_label}{close_type}] pnl={close_plan.pnl_pct * 100:+.2f}% 下单{close_plan.side} size={close_plan.size:.8f} price={order_price}"
+                f"[{close_label}{close_type}] pnl={close_plan.pnl_pct * 100:+.2f}% 下单{close_plan.side} size={close_plan.size:.8f} price={order_price}{flip_close_sub_tag}"
             )
 
             if close_plan.action == "maker":
@@ -936,11 +937,12 @@ def execute_trade(
             elif close_plan.action == "taker":
                 # Taker 平仓：再查询实际持仓确认
                 actual_after = get_position(exchange, symbol)
+                flip_close_filled_tag = " [FLIP_CLOSE_FILLED]" if is_flip else ""
                 if abs(actual_after) < lot_sz * 0.5:
                     state["position"] = 0
                     state["strategy_size"] = 0.0
                     state["entry_bar"] = 0
-                    log_message("[平仓确认] 市价单已成交, 持仓归零")
+                    log_message(f"[平仓确认] 市价单已成交, 持仓归零{flip_close_filled_tag}")
                 else:
                     state["position"] = 1 if actual_after > 0 else -1
                     state["strategy_size"] = abs(actual_after)
@@ -1995,7 +1997,10 @@ def main():
                 elif abs(actual_pos) >= lot_sz * 0.5 and state.get("pending_open"):
                     # pending_open 挂单成交了（但还没被主循环检测到）
                     pos_dir = 1 if actual_pos > 0 else -1
-                    log_message(f"[持仓同步] 检测到挂单已成交: 实际={actual_pos:.6f}")
+                    flip_open_filled_tag_sync = " [FLIP_OPEN_FILLED]" if state.get("pending_open_is_flip") else ""
+                    log_message(f"[持仓同步] 检测到挂单已成交: 实际={actual_pos:.6f}{flip_open_filled_tag_sync}")
+                    if state.get("pending_open_is_flip"):
+                        state["pending_open_is_flip"] = False
                     state["position"] = pos_dir
                     state["strategy_size"] = abs(actual_pos)
                     if state.get("entry_price", 0) == 0:
@@ -2418,9 +2423,12 @@ def main():
                                 state["pending_open"] = False
                                 state["pending_order_id"] = None
                                 pos_name = "多" if pos_dir == 1 else "空"
+                                flip_open_filled_tag = " [FLIP_OPEN_FILLED]" if state.get("pending_open_is_flip") else ""
                                 log_message(
-                                    f"[Maker成交] 入场成功 {pos_name} @{state['entry_price']:.2f} size={state['strategy_size']:.8f}"
+                                    f"[Maker成交] 入场成功 {pos_name} @{state['entry_price']:.2f} size={state['strategy_size']:.8f}{flip_open_filled_tag}"
                                 )
+                                if state.get("pending_open_is_flip"):
+                                    state["pending_open_is_flip"] = False
                                 # 挂 TP 单
                                 state = manage_tp_order(
                                     exchange,
