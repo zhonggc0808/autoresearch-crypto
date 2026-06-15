@@ -13,6 +13,9 @@ oracle_report.json
 results.tsv
 experiments.jsonl
 
+# Sensitivity sweep outputs (regenerated on demand)
+regime_sensitivity/
+
 # Keep baseline params (committed frozen reference) and templates
 !baselines/*_params.json
 !.gitkeep
