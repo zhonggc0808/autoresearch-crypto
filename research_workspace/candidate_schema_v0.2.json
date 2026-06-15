@@ -1,0 +1,227 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CandidateSpecV0.2",
+  "description": "Schema for LLM research candidate specs. Additional properties are rejected at every level.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "experiment_id", "candidate_role", "strategy",
+    "base", "status",
+    "hypothesis", "constraints", "expected_behavior_change",
+    "params"
+  ],
+
+  "definitions": {
+    "strategy_params": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entry_lookback", "min_hold_bars"],
+      "properties": {
+        "entry_lookback":  { "type": "integer", "minimum": 20, "maximum": 1000, "description": "Donchian channel lookback in bars" },
+        "min_hold_bars":   { "type": "integer", "minimum": 12, "maximum": 1440, "description": "Minimum hold before flip allowed" },
+        "enable_long":     { "type": "boolean", "default": true },
+        "enable_short":    { "type": "boolean", "default": true }
+      }
+    },
+
+    "permission_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allow_long", "allow_short"],
+      "properties": {
+        "allow_long":                     { "type": "boolean" },
+        "allow_short":                    { "type": "boolean" },
+        "close_below_ema_disables_long":  { "type": "boolean" },
+        "directional_only":               { "type": "boolean" },
+        "ema_fast":                       { "type": "integer", "minimum": 5,  "maximum": 200 },
+        "ema_slope_days":                 { "type": "integer", "minimum": 2,  "maximum": 30 },
+        "consecutive_below_ema_days":     { "type": "integer", "minimum": 1,  "maximum": 10 }
+      }
+    },
+
+    "regime_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strategy_params", "permission"],
+      "properties": {
+        "candidate":       { "type": "string" },
+        "description":     { "type": "string" },
+        "strategy_params": { "$ref": "#/definitions/strategy_params" },
+        "permission":      { "$ref": "#/definitions/permission_config" }
+      }
+    },
+
+    "regime_filter": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fast_days": { "type": "integer", "minimum": 5, "maximum": 200 },
+        "slow_days": { "type": "integer", "minimum": 10, "maximum": 500 }
+      }
+    },
+
+    "dd_guard": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_dd":      { "type": "number", "minimum": 0.05, "maximum": 0.50 },
+        "recovery_dd": { "type": "number", "minimum": 0.05, "maximum": 0.50 }
+      }
+    },
+
+    "filter_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type":         { "type": "string", "enum": ["adx_gate"] },
+        "adx_threshold": { "type": "integer", "minimum": 10, "maximum": 40 },
+        "apply_to": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["bull", "bear", "neutral"] },
+          "uniqueItems": true
+        }
+      }
+    }
+  },
+
+  "properties": {
+    "experiment_id": {
+      "type": "string",
+      "pattern": "^exp_\\d{4,}$",
+      "description": "Sequential experiment ID, e.g. exp_0001"
+    },
+    "parent_id": {
+      "type": ["string", "null"],
+      "default": null,
+      "pattern": "^(exp_\\d{4,}|channel_breakout_v2_1_balanced)$",
+      "description": "Parent experiment or baseline ID. Use 'channel_breakout_v2_1_balanced' when forking from v2.1 baseline."
+    },
+    "candidate_role": {
+      "type": "string",
+      "enum": ["standalone"],
+      "description": "Candidate role. Currently only 'standalone' is open for research."
+    },
+    "strategy": {
+      "type": "string",
+      "description": "Strategy family. Validated against family_registry by validate_candidate_v08."
+    },
+
+    "base": {
+      "type": "string",
+      "const": "v2.1_balanced",
+      "description": "Frozen baseline this candidate is derived from. Only v2.1_balanced is allowed."
+    },
+    "status": {
+      "type": "string",
+      "const": "research_only",
+      "description": "All LLM-generated candidates start as research_only. Promotion requires human review."
+    },
+
+    "hypothesis": {
+      "type": "string",
+      "minLength": 20,
+      "description": "Clear statement of the experimental hypothesis. What parameter change is being tested and why."
+    },
+    "constraints": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "no_future_data",
+          "inherits_v21_risk",
+          "no_demo_routing",
+          "research_only"
+        ]
+      },
+      "minItems": 4,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "description": "All four constraints are mandatory. They affirm the candidate has no lookahead, inherits known v2.1 risks, does not route to live, and is research-only."
+    },
+    "expected_behavior_change": {
+      "type": "string",
+      "minLength": 20,
+      "description": "What specific behavioral change is expected. E.g. 'Reduces trade frequency by requiring stronger regime conviction before flipping' or 'Increases bear-market sensitivity to capture short trends.' Must be falsifiable."
+    },
+
+    "params": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["strategy_type", "regime_change_policy", "regime_filter", "bull", "bear", "neutral"],
+      "properties": {
+        "strategy_type": {
+          "type": "string",
+          "enum": ["regime_permission_channel_breakout", "volatility_filtered_channel_breakout", "exit_logic_channel_breakout"]
+        },
+        "regime_change_policy": {
+          "type": "string",
+          "enum": ["permission_based"]
+        },
+        "regime_filter": {
+          "$ref": "#/definitions/regime_filter"
+        },
+        "filter": {
+          "$ref": "#/definitions/filter_config"
+        },
+        "bull":    { "$ref": "#/definitions/regime_config" },
+        "bear":    { "$ref": "#/definitions/regime_config" },
+        "neutral": { "$ref": "#/definitions/regime_config" }
+      }
+    },
+
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "safe_reversal": { "type": "boolean", "default": true },
+        "regime_filter": { "$ref": "#/definitions/regime_filter" },
+        "dd_guard": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/definitions/dd_guard" }
+          ]
+        }
+      }
+    },
+
+    "description": {
+      "type": "string",
+      "description": "Optional human-readable one-line summary."
+    },
+    "filter": {
+      "$ref": "#/definitions/filter_config",
+      "description": "Top-level filter config (alternative to params.filter). Deprecated — use params.filter."
+    }
+  },
+
+  "allOf": [
+    {
+      "description": "regime_filter fast_days must be less than slow_days",
+      "if": {
+        "required": ["params"],
+        "properties": {
+          "params": {
+            "required": ["regime_filter"],
+            "properties": {
+              "regime_filter": { "required": ["fast_days", "slow_days"] }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "params": {
+            "properties": {
+              "regime_filter": {
+                "properties": {
+                  "fast_days": { "type": "integer" },
+                  "slow_days": { "type": "integer" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

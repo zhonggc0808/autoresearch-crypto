@@ -1,0 +1,30 @@
+{
+  "version": "1.0.0",
+  "status": "stable",
+  "description": "LLM Research Organization — structured, auditable, constraint-based system for autonomous crypto trading strategy research.",
+  "families": [
+    "channel_breakout",
+    "volatility_filtered_breakout",
+    "exit_logic_variant"
+  ],
+  "codegen": {
+    "status": "limited",
+    "version": "v0.9a",
+    "sandbox": "active",
+    "writable": "research_workspace/codegen_candidates/",
+    "forbidden": [
+      "dex/",
+      "scripts/research_oracle.py",
+      "checkpoints/",
+      "live_*.py",
+      "family_registry.py",
+      "existing candidate files"
+    ],
+    "oracle_evaluation": "deferred_to_v0.9b"
+  },
+  "promotion": "human_review_required",
+  "oracle": "research_oracle.py (immutable)",
+  "baseline": "channel_breakout_v2_1_balanced.pt (frozen)",
+  "known_failures": "tests/known_failures.md",
+  "checksum": null
+}

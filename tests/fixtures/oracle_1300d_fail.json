@@ -1,0 +1,28 @@
+{
+  "experiment_id": "fixture_1300d_fail",
+  "strategy": "channel_breakout_v21",
+  "oracle_version": "v0.2",
+  "timestamp": "2026-06-15T10:00:00Z",
+  "flags": {
+    "status": "REJECT",
+    "warnings": ["DD_OVER_40"],
+    "disqualifications": ["DD_OVER_50", "ROLLING_NEGATIVE"]
+  },
+  "metrics": {
+    "is": {
+      "raw": {"return": 0.1706, "dd": -0.5333, "sharpe": 0.1148, "win_rate": 0.36, "annual_return": 0.05, "annual_vol": 0.56, "trades": 141, "trades_per_year": 56.6, "score": 0.0, "n_bars": 262068},
+      "safe_execution": {"return": 0.0956, "dd": -0.5788, "sharpe": 0.0662, "win_rate": 0.35, "annual_return": 0.04, "annual_vol": 0.56, "trades": 141, "trades_per_year": 56.6, "score": 0.0, "n_bars": 262068},
+      "regime_permission": {"return": 0.5540, "dd": -0.5666, "sharpe": 0.3580, "win_rate": 0.37, "annual_return": 0.19, "annual_vol": 0.54, "trades": 108, "trades_per_year": 43.3, "score": 0.0, "n_bars": 262068}
+    },
+    "oos": {
+      "raw": {"return": 1.1532, "dd": -0.4371, "sharpe": 1.7136, "win_rate": 0.48, "annual_return": 1.05, "annual_vol": 0.61, "trades": 75, "trades_per_year": 70.2, "score": 0.0, "n_bars": 112316},
+      "safe_execution": {"return": 1.1116, "dd": -0.4371, "sharpe": 1.6548, "win_rate": 0.49, "annual_return": 1.01, "annual_vol": 0.61, "trades": 75, "trades_per_year": 70.2, "score": 0.0, "n_bars": 112316},
+      "regime_permission": {"return": 1.7337, "dd": -0.3385, "sharpe": 2.6031, "win_rate": 0.51, "annual_return": 1.56, "annual_vol": 0.60, "trades": 71, "trades_per_year": 66.5, "score": 0.0, "n_bars": 112316}
+    },
+    "rolling": {"6m_min_return": -0.2649, "6m_min_sharpe": -1.0816, "12m_min_return": -0.2962, "12m_min_sharpe": -0.4670},
+    "regime": {"bull": {"return": -0.2758, "trades": 22, "bars": 174224}, "bear": {"return": 7.0635, "trades": 145, "bars": 140560}, "neutral": {"return": 0.8454, "trades": 29, "bars": 59600}},
+    "execution_parity": 0.9993,
+    "correlation": {"vs_baseline": 0.788},
+    "sensitivity": {"is": {"fees": {"0bp": 0.1832, "2bp": 0.1381, "4bp": 0.0946, "10bp": -0.026}, "slippage": {"0bp": 0.1978, "2bp": 0.1381, "5bp": 0.0539}}, "oos": {"fees": {"0bp": 1.2018, "2bp": 1.1532, "4bp": 1.1056, "10bp": 0.9691}, "slippage": {"0bp": 1.2177, "2bp": 1.1532, "5bp": 1.0599}}}
+  }
+}

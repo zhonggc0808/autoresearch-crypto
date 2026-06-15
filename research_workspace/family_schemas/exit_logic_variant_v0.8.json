@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ExitLogicVariant v0.8",
+  "description": "Channel breakout with configurable exit logic. Adds take-profit, stop-loss, max-hold, and exit-lookback controls on top of the standard regime-permission channel breakout structure.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["strategy_type", "regime_filter", "exit_logic", "bull", "bear", "neutral"],
+  "properties": {
+    "strategy_type": {
+      "type": "string",
+      "enum": ["exit_logic_channel_breakout"]
+    },
+    "regime_change_policy": {
+      "type": "string",
+      "enum": ["permission_based"]
+    },
+    "regime_filter": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fast_days": { "type": "integer", "minimum": 5, "maximum": 200 },
+        "slow_days": { "type": "integer", "minimum": 10, "maximum": 500 }
+      }
+    },
+    "exit_logic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exit_lookback", "take_profit_pct", "stop_loss_pct", "max_hold_bars", "trailing_stop"],
+      "properties": {
+        "exit_lookback":  { "type": "integer", "minimum": 12, "maximum": 1440, "description": "Lookback bars for exit signal generation" },
+        "take_profit_pct": { "type": "number", "minimum": 0.01, "maximum": 0.50, "description": "Take-profit threshold (1% to 50%)" },
+        "stop_loss_pct":  { "type": "number", "minimum": 0.01, "maximum": 0.30, "description": "Stop-loss threshold (1% to 30%)" },
+        "max_hold_bars":  { "type": "integer", "minimum": 12, "maximum": 2880, "description": "Maximum bars to hold a position before forced exit" },
+        "trailing_stop":  { "type": "boolean", "description": "Whether stop-loss is trailing (adjusts upward in profit)" }
+      }
+    },
+    "bull":    { "$ref": "#/definitions/regime_config" },
+    "bear":    { "$ref": "#/definitions/regime_config" },
+    "neutral": { "$ref": "#/definitions/regime_config" }
+  },
+  "definitions": {
+    "strategy_params": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entry_lookback", "min_hold_bars"],
+      "properties": {
+        "entry_lookback": { "type": "integer", "minimum": 20, "maximum": 1000, "description": "Donchian channel lookback in bars" },
+        "min_hold_bars":  { "type": "integer", "minimum": 12, "maximum": 1440, "description": "Minimum hold before flip allowed" },
+        "enable_long":    { "type": "boolean" },
+        "enable_short":   { "type": "boolean" }
+      }
+    },
+    "permission_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allow_long", "allow_short"],
+      "properties": {
+        "allow_long":                     { "type": "boolean" },
+        "allow_short":                    { "type": "boolean" },
+        "close_below_ema_disables_long":  { "type": "boolean" },
+        "directional_only":               { "type": "boolean" },
+        "ema_fast":                       { "type": "integer", "minimum": 5,  "maximum": 200 },
+        "ema_slope_days":                 { "type": "integer", "minimum": 2,  "maximum": 30 },
+        "consecutive_below_ema_days":     { "type": "integer", "minimum": 1,  "maximum": 10 }
+      }
+    },
+    "regime_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strategy_params", "permission"],
+      "properties": {
+        "candidate":       { "type": "string" },
+        "description":     { "type": "string" },
+        "strategy_params": { "$ref": "#/definitions/strategy_params" },
+        "permission":      { "$ref": "#/definitions/permission_config" }
+      }
+    }
+  }
+}

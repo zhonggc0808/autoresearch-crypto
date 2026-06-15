@@ -1,0 +1,29 @@
+{
+  "scorecard_version": "v0.3",
+  "stage": "1300d",
+  "window": "1300d",
+  "timestamp": "2026-06-15T10:00:00Z",
+  "experiment_id": "exp_0002",
+  "parent_id": "channel_breakout_v2_1_balanced",
+  "candidate_role": "standalone",
+  "strategy": "channel_breakout",
+  "description": "Widening regime filter fast/slow ratio",
+  "hypothesis": "Wider regime filter reduces false transitions during neutral chop.",
+  "verdict": {"label": "requires_2600d", "reason": "1300d status=WARN. 2600d verification required.", "source_status": "WARN"},
+  "next_steps": "Run 2600d evaluation if data is available.",
+  "promotion_gates": {"all_pass": false, "gates_passed": 3, "gates_total": 8, "gates": {}},
+  "metrics_summary": {
+    "is_return": 0.6717, "is_dd": -0.4274, "is_sharpe": 0.4197,
+    "oos_safe_return": 1.5748, "oos_dd": -0.3385,
+    "rolling_12m_min_return": -0.1301,
+    "trades_per_year": 39.7,
+    "corr_vs_baseline": 0.985,
+    "execution_parity": 0.9989,
+    "fee_10bp_return": 0.479
+  },
+  "flags": {
+    "status": "WARN",
+    "warnings": ["DD_OVER_40"],
+    "disqualifications": []
+  }
+}
