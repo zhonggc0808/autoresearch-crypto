@@ -12,7 +12,7 @@ Orchestrates the candidate lifecycle:
                 → promote_review_pending (stop)
 
 This script is the ORCHESTRATOR.  It delegates to:
-    - ``validate_candidate_v02`` for schema checking
+    - ``validate_candidate_v08`` for schema checking (family-aware, supports filter/overlay)
     - ``research_oracle`` for evaluation
     - ``score_candidate`` for scorecard production
 
@@ -47,7 +47,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 if str(PROJECT_DIR) not in sys.path:
@@ -58,18 +58,18 @@ if str(PROJECT_DIR) not in sys.path:
 # ---------------------------------------------------------------------------
 
 from scripts.score_candidate import (
-    VERDICT_KILL,
-    VERDICT_REQUIRES_2600D,
     VERDICT_BLOCKED_MISSING_2600D,
-    VERDICT_RESEARCH_ONLY_RECENT_REGIME,
-    VERDICT_PROMOTE_REVIEW_PENDING,
-    VERDICT_INVALID_ORACLE,
     VERDICT_INVALID_CANDIDATE,
+    VERDICT_INVALID_ORACLE,
+    VERDICT_KILL,
+    VERDICT_PROMOTE_REVIEW_PENDING,
+    VERDICT_REQUIRES_2600D,
+    VERDICT_RESEARCH_ONLY_RECENT_REGIME,
     build_scorecard_from_result,
-    write_scorecard_and_log,
     load_scorecard,
+    write_scorecard_and_log,
 )
-from scripts.validate_candidate_v02 import validate_candidate as _validate_schema
+from scripts.validate_candidate_v08 import validate_candidate as _validate_schema
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -84,18 +84,22 @@ DATA_DIR = PROJECT_DIR / "data" / "crypto"
 # ---------------------------------------------------------------------------
 
 # Terminal states (evaluation stops here)
-TERMINAL_STATES = frozenset({
-    VERDICT_KILL,
-    VERDICT_BLOCKED_MISSING_2600D,
-    VERDICT_RESEARCH_ONLY_RECENT_REGIME,
-    VERDICT_PROMOTE_REVIEW_PENDING,
-    VERDICT_INVALID_CANDIDATE,
-})
+TERMINAL_STATES = frozenset(
+    {
+        VERDICT_KILL,
+        VERDICT_BLOCKED_MISSING_2600D,
+        VERDICT_RESEARCH_ONLY_RECENT_REGIME,
+        VERDICT_PROMOTE_REVIEW_PENDING,
+        VERDICT_INVALID_CANDIDATE,
+    }
+)
 
 # Non-terminal states (evaluation should continue)
-NON_TERMINAL_STATES = frozenset({
-    VERDICT_REQUIRES_2600D,
-})
+NON_TERMINAL_STATES = frozenset(
+    {
+        VERDICT_REQUIRES_2600D,
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -125,18 +129,21 @@ def _has_2600d_data() -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _run_oracle_1300d(candidate_path: Path, fast_days: int = 50,
-                      slow_days: int = 200) -> Dict[str, Any]:
+def _run_oracle_1300d(
+    candidate_path: Path, fast_days: int = 50, slow_days: int = 200
+) -> Dict[str, Any]:
     """Run 1300d oracle evaluation for a candidate spec.
 
     Calls ``research_oracle.run_oracle()`` with the candidate file and
     persists the result to ``experiments.jsonl`` / ``results.tsv``.
     """
     from scripts.research_oracle import (
-        run_oracle as _oracle_run,
-        _write_oracle_report,
-        _append_results_tsv,
         _append_experiments_jsonl,
+        _append_results_tsv,
+        _write_oracle_report,
+    )
+    from scripts.research_oracle import (
+        run_oracle as _oracle_run,
     )
 
     result = _oracle_run(
@@ -247,9 +254,7 @@ def evaluate_stage_1300d(
     print(f"  1300d oracle completed in {elapsed:.1f}s")
 
     # Build scorecard
-    scorecard = build_scorecard_from_result(
-        oracle_result, candidate_spec, stage="1300d"
-    )
+    scorecard = build_scorecard_from_result(oracle_result, candidate_spec, stage="1300d")
 
     # Write
     write_scorecard_and_log(scorecard)
@@ -395,16 +400,17 @@ def evaluate_candidate(
         return _error_state(eid, VERDICT_INVALID_CANDIDATE, f"Invalid JSON: {e}")
 
     eid = candidate_spec.get("experiment_id", candidate_path.stem)
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  Evaluating candidate: {eid}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     # --- Validate schema ---
-    print(f"\n[Phase 1] Schema validation ...")
-    schema_errors = _validate_schema(candidate_spec, current_path=candidate_path,
-                                     check_uniqueness=False)
+    print("\n[Phase 1] Schema validation ...")
+    schema_errors = _validate_schema(
+        candidate_spec, current_path=candidate_path, check_uniqueness=False
+    )
     if schema_errors:
-        print(f"[FAIL] Candidate schema invalid:")
+        print("[FAIL] Candidate schema invalid:")
         for e in schema_errors:
             print(f"  - {e}")
         state = _init_evaluation_state(eid, candidate_path)
@@ -421,7 +427,7 @@ def evaluate_candidate(
         if not dry_run:
             _save_evaluation_state(state)
         return state
-    print(f"  [OK] Schema valid")
+    print("  [OK] Schema valid")
 
     # --- Initialize or load evaluation state ---
     state = _load_evaluation_state(eid)
@@ -436,10 +442,13 @@ def evaluate_candidate(
         return state
 
     # --- Phase 2: 1300d evaluation ---
-    print(f"\n[Phase 2] 1300d evaluation ...")
+    print("\n[Phase 2] 1300d evaluation ...")
     verdict_1300d, scorecard_1300d = evaluate_stage_1300d(
-        candidate_path, candidate_spec, state,
-        force=force, dry_run=dry_run,
+        candidate_path,
+        candidate_spec,
+        state,
+        force=force,
+        dry_run=dry_run,
     )
 
     # Terminal check
@@ -450,10 +459,13 @@ def evaluate_candidate(
         return state
 
     # --- Phase 3: 2600d evaluation ---
-    print(f"\n[Phase 3] 2600d evaluation ...")
+    print("\n[Phase 3] 2600d evaluation ...")
     verdict_2600d, scorecard_2600d = evaluate_stage_2600d(
-        candidate_path, candidate_spec, state,
-        force=force, dry_run=dry_run,
+        candidate_path,
+        candidate_spec,
+        state,
+        force=force,
+        dry_run=dry_run,
     )
 
     # --- Finalize ---
@@ -468,13 +480,13 @@ def evaluate_candidate(
         _save_evaluation_state(state)
 
     # Print summary
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  Evaluation complete: {eid}")
     print(f"  Final verdict: {state.get('final_verdict', '?')}")
     print(f"  History: {len(state['history'])} stage(s)")
     for h in state["history"]:
         print(f"    {h['stage']}: {h['verdict']}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     return state
 
@@ -501,27 +513,36 @@ def main():
         description="Candidate evaluation orchestrator v0.3 — dual-window state machine"
     )
     parser.add_argument(
-        "--candidate", type=str, required=True,
+        "--candidate",
+        type=str,
+        required=True,
         help="Path to candidate spec JSON file",
     )
     parser.add_argument(
-        "--resume", action="store_true",
+        "--resume",
+        action="store_true",
         help="Resume from existing evaluation state (skip completed stages)",
     )
     parser.add_argument(
-        "--force", action="store_true",
+        "--force",
+        action="store_true",
         help="Force re-evaluation from scratch (ignore existing scorecards)",
     )
     parser.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Dry-run: validate + show planned stages, no oracle or writes",
     )
     parser.add_argument(
-        "--fast-days", type=int, default=50,
+        "--fast-days",
+        type=int,
+        default=50,
         help="EMA fast period for regime labels (default: 50)",
     )
     parser.add_argument(
-        "--slow-days", type=int, default=200,
+        "--slow-days",
+        type=int,
+        default=200,
         help="EMA slow period for regime labels (default: 200)",
     )
     args = parser.parse_args()
@@ -544,13 +565,13 @@ def main():
         print(f"\nExit: {final}")
         sys.exit(0 if final == VERDICT_KILL else 1)
     elif final == VERDICT_BLOCKED_MISSING_2600D:
-        print(f"\nExit: blocked_missing_2600d_data (expected — 2600d not yet available)")
+        print("\nExit: blocked_missing_2600d_data (expected — 2600d not yet available)")
         sys.exit(0)
     elif final == VERDICT_RESEARCH_ONLY_RECENT_REGIME:
-        print(f"\nExit: research_only_recent_regime")
+        print("\nExit: research_only_recent_regime")
         sys.exit(0)
     elif final == VERDICT_PROMOTE_REVIEW_PENDING:
-        print(f"\nExit: promote_review_pending -- candidate ready for human review")
+        print("\nExit: promote_review_pending -- candidate ready for human review")
         sys.exit(0)
     else:
         print(f"\nExit: {final}")

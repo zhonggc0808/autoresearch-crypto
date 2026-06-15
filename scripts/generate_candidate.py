@@ -252,10 +252,15 @@ def _build_full_candidate(
     params = llm_proposal.get("params", {})
     candidate["strategy"] = _resolve_strategy_from_params(params)
 
-    # Copy fields from LLM proposal
+    # Copy fields from LLM proposal (with fallbacks)
     for key in ("parent_id", "description", "hypothesis", "expected_behavior_change"):
         if key in llm_proposal:
             candidate[key] = llm_proposal[key]
+    # Fallbacks for required fields the LLM sometimes omits
+    if "description" not in candidate and "hypothesis" in candidate:
+        candidate["description"] = candidate["hypothesis"][:160]
+    if "expected_behavior_change" not in candidate and "hypothesis" in candidate:
+        candidate["expected_behavior_change"] = candidate["hypothesis"][:160]
 
     # Copy params
     if "params" in llm_proposal:
