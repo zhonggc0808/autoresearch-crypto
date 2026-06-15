@@ -125,7 +125,7 @@ def test_baseline_metric_regression():
     assert -0.38 <= o["dd"] <= -0.30
     assert 2.1 <= o["sharpe"] <= 2.6
     assert 50 <= o["trades"] <= 100
-    assert result.get("oracle_version") == "v0.1.0"
+    assert result.get("oracle_version") == "v0.2"
     print("  [PASS] Baseline metric regression")
 
 

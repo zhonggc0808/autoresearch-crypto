@@ -86,7 +86,7 @@ JSONL_PATH = OUTPUT_DIR / "experiments.jsonl"
 BASELINE_DIR = OUTPUT_DIR / "baselines"
 
 # Oracle version — increment when evaluation logic changes
-ORACLE_VERSION = "v0.1.0"
+ORACLE_VERSION = "v0.2"
 BASELINE_ID = "channel_breakout_v2_1_balanced"
 FROZEN_BASELINE_PARAMS = BASELINE_DIR / f"{BASELINE_ID}_params.json"
 SPLIT_ID = f"{SYMBOL}_{INTERVAL}_1300d_{int(SPLIT_RATIO*100)}_{int((1-SPLIT_RATIO)*100)}_full_warmup"
@@ -230,7 +230,12 @@ def _generate_raw_signals(strategy, df: pd.DataFrame) -> np.ndarray:
     return generate_strategy_signals(strategy, df, enable_short=enable_short)
 
 
-def _generate_v21_signals(checkpoint: Dict[str, Any], df: pd.DataFrame) -> np.ndarray:
+def _generate_v21_signals(
+    checkpoint: Dict[str, Any],
+    df: pd.DataFrame,
+    fast_days: int = 50,
+    slow_days: int = 200,
+) -> np.ndarray:
     """Replay the v2.1 regime-permission signal pipeline.
 
     This reconstructs the multi-regime channel breakout with permission
@@ -250,7 +255,7 @@ def _generate_v21_signals(checkpoint: Dict[str, Any], df: pd.DataFrame) -> np.nd
     bear_raw = _generate_raw_signals(bear_s, df)
     neutral_raw = _generate_raw_signals(neutral_s, df)
 
-    regimes = build_daily_regime_labels(df, fast_days=50, slow_days=200)
+    regimes = build_daily_regime_labels(df, fast_days=fast_days, slow_days=slow_days)
     adx_full, _, _ = compute_adx(df, 14)
     daily_ctx = compute_daily_indicators(df)
 
@@ -597,6 +602,8 @@ def run_oracle(
     checkpoint_path: Optional[str] = None,
     candidate_path: Optional[str] = None,
     use_baseline: bool = False,
+    fast_days: int = 50,
+    slow_days: int = 200,
 ) -> Dict[str, Any]:
     """Run the full oracle evaluation and return structured results.
 
@@ -652,7 +659,7 @@ def run_oracle(
 
     # --- Generate signals on FULL data first (for regime pre-compute) ---
     if is_v21:
-        signals_raw_full = _generate_v21_signals(checkpoint, df_full)
+        signals_raw_full = _generate_v21_signals(checkpoint, df_full, fast_days, slow_days)
         strategy_family = "channel_breakout_v21"
     else:
         strategy = checkpoint.get("_strategy_instance")
@@ -671,14 +678,14 @@ def run_oracle(
     if _filter_config is not None:
         from dex.indicators import compute_adx
         adx_full, _, _ = compute_adx(df_full, 14)
-        regimes_full = build_daily_regime_labels(df_full, fast_days=50, slow_days=200)
+        regimes_full = build_daily_regime_labels(df_full, fast_days=fast_days, slow_days=slow_days)
         filter_fn = build_filter_from_config(_filter_config, adx_full, regimes_full)
         signals_raw_full = filter_fn(signals_raw_full)
         signals_raw_is = signals_raw_full[:split_idx]
         signals_raw_oos = signals_raw_full[split_idx:]
 
     # --- Pre-compute regimes on FULL data (EMA50/200 warmup on df_full) ---
-    regimes_full = build_daily_regime_labels(df_full, fast_days=50, slow_days=200)
+    regimes_full = build_daily_regime_labels(df_full, fast_days=fast_days, slow_days=slow_days)
     regimes_is = regimes_full[:split_idx]
     regimes_oos = regimes_full[split_idx:]
 
@@ -814,6 +821,13 @@ def run_oracle(
     }
     # --- Add version fields ---
     result["oracle_version"] = ORACLE_VERSION
+    result["oracle"] = {
+        "version": ORACLE_VERSION,
+        "regime_filter": {
+            "fast_days": fast_days,
+            "slow_days": slow_days,
+        },
+    }
     result["baseline_id"] = BASELINE_ID
     result["split_id"] = SPLIT_ID
     result["checkpoint_hash"] = checkpoint_hash
@@ -928,7 +942,7 @@ def _append_experiments_jsonl(result: Dict[str, Any]) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Research Oracle — fixed evaluation harness (Phase 2)"
+        description="Research Oracle — fixed evaluation harness"
     )
     parser.add_argument(
         "--checkpoint", type=str, default=None,
@@ -946,22 +960,39 @@ def main():
         "--no-write", action="store_true",
         help="Do not write output files (dry-run).",
     )
+    parser.add_argument(
+        "--fast-days", type=int, default=50,
+        help="EMA fast period for regime labels (default: 50)",
+    )
+    parser.add_argument(
+        "--slow-days", type=int, default=200,
+        help="EMA slow period for regime labels (default: 200)",
+    )
     args = parser.parse_args()
+
+    # Validate regime parameters
+    if args.fast_days <= 0:
+        parser.error("--fast-days must be > 0")
+    if args.slow_days <= 0:
+        parser.error("--slow-days must be > 0")
+    if args.fast_days >= args.slow_days:
+        parser.error("--fast-days must be less than --slow-days")
 
     # Require exactly one input mode
     modes = sum([bool(args.checkpoint), args.baseline, bool(args.candidate)])
     if modes != 1:
         parser.error("Exactly one of --checkpoint, --baseline, or --candidate is required.")
 
-    print(f"=== Research Oracle (Phase 2 freeze {ORACLE_VERSION}) ===")
+    print(f"=== Research Oracle {ORACLE_VERSION} ===")
     if args.baseline:
         print(f"  Mode: baseline (frozen JSON params)")
     elif args.checkpoint:
         print(f"  Checkpoint: {args.checkpoint}")
     elif args.candidate:
         print(f"  Candidate: {args.candidate}")
-    print(f"  Symbol: {SYMBOL} / {INTERVAL} (1300d, v0.1.0 freeze)")
+    print(f"  Symbol: {SYMBOL} / {INTERVAL} (1300d, v0.2 data)")
     print(f"  Split: {int(SPLIT_RATIO*100)}/{int((1-SPLIT_RATIO)*100)} IS/OOS")
+    print(f"  Regime: EMA fast={args.fast_days}d / slow={args.slow_days}d")
     print()
 
     t0 = time.time()
@@ -969,6 +1000,8 @@ def main():
         checkpoint_path=args.checkpoint,
         candidate_path=args.candidate,
         use_baseline=args.baseline,
+        fast_days=args.fast_days,
+        slow_days=args.slow_days,
     )
     elapsed = time.time() - t0
 
