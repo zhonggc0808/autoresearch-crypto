@@ -1,0 +1,26 @@
+{
+  "type": "object",
+  "description": "Neutral regime entry blocker — prevents new entries in low-conviction regimes",
+  "required": ["family", "metric", "action"],
+  "properties": {
+    "family": {
+      "const": "neutral_regime_entry_block",
+      "description": "Filter family identifier"
+    },
+    "metric": {
+      "type": "string",
+      "enum": ["regime_label"],
+      "description": "Uses the existing daily EMA cross regime labels (50/200)"
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "block_entries_when_neutral",
+        "block_short_entries_when_neutral",
+        "block_long_entries_when_neutral"
+      ],
+      "description": "What to block during NEUTRAL regime. Entry-only — existing positions untouched."
+    }
+  },
+  "additionalProperties": false
+}

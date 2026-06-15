@@ -293,6 +293,81 @@ def apply_cooldown_after_drawdown(
     return out
 
 
+def apply_neutral_regime_block(
+    signals: np.ndarray,
+    regimes: np.ndarray,
+    action: str = "block_entries_when_neutral",
+    diag: Optional[Dict[str, Any]] = None,
+) -> np.ndarray:
+    """Block new entries during NEUTRAL regime.
+
+    Entry-only — existing positions are NOT closed. This targets
+    low-directional-conviction bars where fees tend to erode returns.
+
+    Args:
+        signals: Raw strategy signals.
+        regimes: Regime labels per bar (BULL/BEAR/NEUTRAL, uppercase).
+        action: What to block during NEUTRAL:
+            - block_entries_when_neutral: block all new entries
+            - block_short_entries_when_neutral: only block new shorts
+            - block_long_entries_when_neutral: only block new longs
+        diag: Optional diagnostics dict.
+
+    Returns:
+        Modified signals with entries blocked during NEUTRAL regime.
+    """
+    out = signals.copy()
+    position = 0
+
+    counters = {
+        "neutral_bars": 0,
+        "blocked_long_entries": 0,
+        "blocked_short_entries": 0,
+        "signals_changed_total": 0,
+    }
+
+    for i in range(len(out)):
+        raw = int(out[i])
+        sig = raw
+        is_neutral = i < len(regimes) and str(regimes[i]).upper() == "NEUTRAL"
+
+        if is_neutral:
+            counters["neutral_bars"] += 1
+
+            if action == "block_short_entries_when_neutral":
+                if sig == 3 and position != -1:
+                    sig = 1
+                    counters["blocked_short_entries"] += 1
+            elif action == "block_long_entries_when_neutral":
+                if sig == 2 and position != 1:
+                    sig = 1
+                    counters["blocked_long_entries"] += 1
+            else:  # block_entries_when_neutral
+                if sig == 2 and position != 1:
+                    sig = 1
+                    counters["blocked_long_entries"] += 1
+                elif sig == 3 and position != -1:
+                    sig = 1
+                    counters["blocked_short_entries"] += 1
+
+        if sig != raw:
+            counters["signals_changed_total"] += 1
+
+        out[i] = sig
+
+        if sig == 2:
+            position = 1
+        elif sig == 3:
+            position = -1
+        elif sig == 0:
+            position = 0
+
+    if diag is not None:
+        diag.update(counters)
+
+    return out
+
+
 def build_filter_from_config(
     config: Dict[str, Any],
     adx: np.ndarray,
@@ -371,5 +446,18 @@ def build_filter_from_config(
 
     raise ValueError(
         f"Unknown filter type: {filter_type!r}. "
-        f"Supported types: adx_gate, volatility_gate, cooldown_after_drawdown"
+    if filter_type == "neutral_regime_entry_block":
+        action = config.get("action", "block_entries_when_neutral")
+        filter_diag: Dict[str, Any] = {}
+        def _nr_fn(s: np.ndarray) -> np.ndarray:
+            return apply_neutral_regime_block(
+                s, regimes, action=action, diag=filter_diag,
+            )
+        _nr_fn.diag = filter_diag  # type: ignore[attr-defined]
+        return _nr_fn
+
+    raise ValueError(
+        f"Unknown filter type: {filter_type!r}. "
+        f"Supported types: adx_gate, volatility_gate, cooldown_after_drawdown, neutral_regime_entry_block"
+    )
     )

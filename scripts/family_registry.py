@@ -337,6 +337,33 @@ COOLDOWN_AFTER_DRAWDOWN = FamilyDefinition(
 )
 
 
+NEUTRAL_REGIME_ENTRY_BLOCK = FamilyDefinition(
+    name="neutral_regime_entry_block",
+    description="Blocks new entries during NEUTRAL regime — reduces low-conviction trading",
+    schema_file="neutral_regime_entry_block_v0.1.json",
+    strategy_type="neutral_regime_entry_block_filter",
+    strategy_params={
+        "metric": ParamDef(str, enum=["regime_label"]),
+        "action": ParamDef(
+            str,
+            enum=[
+                "block_entries_when_neutral",
+                "block_short_entries_when_neutral",
+                "block_long_entries_when_neutral",
+            ],
+        ),
+    },
+    allowed_change={},
+    allowed_change_nested={},
+    search_space_text=(
+        "neutral_regime_entry_block filter: blocks entries during NEUTRAL regime\n"
+        "metric: regime_label\n"
+        "action: block_entries_when_neutral | block_short_entries_when_neutral | block_long_entries_when_neutral"
+    ),
+    extra_fields=[],
+)
+
+
 # ---------------------------------------------------------------------------
 # Initialize
 # ---------------------------------------------------------------------------
@@ -346,3 +373,4 @@ register(VOLATILITY_FILTERED_BREAKOUT)
 register(EXIT_LOGIC_VARIANT)
 register(VOLATILITY_GATE)
 register(COOLDOWN_AFTER_DRAWDOWN)
+register(NEUTRAL_REGIME_ENTRY_BLOCK)
