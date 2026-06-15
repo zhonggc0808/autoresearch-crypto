@@ -177,20 +177,20 @@ drawdown_guard, or cooldown_filter.
    or entry blocking conditional on market state.
    A regime_filter-only change does not count.
 
-10. **Volatility gate constraints (learned from exp_0045, exp_0046).**
-    - broad high-vol block: improved IS DD but killed rolling12m + fee.
-    - cooldown_after_drawdown: made EVERYTHING worse (DD, rolling, fee, return).
-      DO NOT continue close_drawdown cooldown filters.
-    NEW direction: directional (asymmetric) volatility gate.
-    Allowed volatility_gate actions:
-    - block_short_entries_when_high_vol (only block shorts, allow longs)
-    - block_long_entries_when_high_vol (only block longs, allow shorts)
-    Pick ONE direction. Do NOT block both sides.
+10. **Volatility gate learnings (exp_0045/46/47 — ALL killed).**
+    - broad high-vol block (exp_0045): DD slightly better, rolling+fee worse.
+    - cooldown_after_drawdown (exp_0046): EVERYTHING worse. DO NOT use.
+    - block_long_entries_when_high_vol (exp_0047): DD -64%, rolling -31%,
+      fee -65%. WORSE than broad block. DO NOT use.
+    LAST test: block_short_entries_when_high_vol ONLY.
+    Do NOT test block_long_entries_when_high_vol.
+    Do NOT test broad block_entries_when_high_vol.
+    Only action allowed: block_short_entries_when_high_vol.
 
-11. **Preferred filter strategy:**
-    - Pick a directional volatility gate (above).
-    - Justify which side you're blocking and why.
-    - Do NOT propose broad two-sided entry blocks or drawdown cooldowns.
+11. **Constraint:**
+    - Use filter.family = volatility_gate.
+    - action MUST be block_short_entries_when_high_vol.
+    - Justify why blocking shorts (not longs) helps rolling12m and fee.
 
 12. **Correlation constraint:** target corr_vs_baseline < 0.85.
 
