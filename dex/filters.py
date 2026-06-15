@@ -30,14 +30,19 @@ def apply_adx_filter(
         adx: ADX values, same length as signals.
         threshold: Minimum ADX to allow entry (0=disabled).
         apply_to: List of regimes to enforce filter on (e.g. ["neutral"]).
-                  None = apply to all regimes.
-        regimes: Daily regime labels per bar (BULL/BEAR/NEUTRAL).
+                  None = apply to all regimes. Case-insensitive.
+        regimes: Daily regime labels per bar (BULL/BEAR/NEUTRAL, uppercase).
 
     Returns:
         Modified signals with low-ADX entries blocked.
     """
     if threshold <= 0:
         return signals  # disabled
+
+    # Normalize apply_to to uppercase for case-insensitive comparison
+    normalized_apply_to = None
+    if apply_to is not None:
+        normalized_apply_to = [r.upper() for r in apply_to]
 
     out = signals.copy()
     position = 0
@@ -48,9 +53,9 @@ def apply_adx_filter(
 
         # Determine if this bar should be filtered
         should_filter = True
-        if regimes is not None and apply_to is not None:
-            regime = str(regimes[i]) if i < len(regimes) else "NEUTRAL"
-            should_filter = regime in apply_to
+        if regimes is not None and normalized_apply_to is not None:
+            regime = str(regimes[i]).upper() if i < len(regimes) else "NEUTRAL"
+            should_filter = regime in normalized_apply_to
 
         # Block new entries when ADX is low
         if should_filter and adx[i] < threshold:
@@ -86,6 +91,9 @@ def build_filter_from_config(
 
     Returns:
         A callable ``filter_fn(signals: np.ndarray) -> np.ndarray``.
+
+    Raises:
+        ValueError: If filter type is unknown (typo guard).
     """
     if not config:
         return lambda s: s
@@ -99,5 +107,7 @@ def build_filter_from_config(
             s, adx, threshold=threshold, apply_to=apply_to, regimes=regimes,
         )
 
-    # Unknown filter type → pass through
-    return lambda s: s
+    raise ValueError(
+        f"Unknown filter type: {filter_type!r}. "
+        f"Supported types: adx_gate"
+    )
