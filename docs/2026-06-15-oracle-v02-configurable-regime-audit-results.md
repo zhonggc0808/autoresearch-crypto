@@ -74,10 +74,36 @@ Status: **Complete**
 **None.** Phase 5A was a research sensitivity audit only. No baseline change,
 no demo/live routing change, no checkpoint replacement.
 
-## Phase 5B (Not Started)
+## Phase 5B — Operationalization Complete
 
-Future step if oracle configuration grows to 4+ independent dimensions.
-Current oracle remains at v0.2 with two configurable parameters (fast_days, slow_days).
+### Sweep Hardening
+
+| Feature | Status |
+|---------|--------|
+| `--days` argument (default 1300) | ✅ |
+| Data path/hash in output | ✅ `audit.data_path`, `audit.data_hash` |
+| PASS/REVIEW/FAIL verdict schema | ✅ Implemented in `_compute_verdict()` |
+| Inline summary table | ✅ Printed to console |
+| Wrapper-only (no oracle `--regime-sweep`) | ✅ Verified |
+
+### Verdict Flow
+
+```
+PASS:   default wins Sharpe AND DD within 5pp of best
+REVIEW: default Sharpe not highest, or DD >5pp worse than best
+FAIL:   parity failure or default not found
+```
+
+### 2600d Sensitivity Annex
+
+| Item | Status |
+|------|--------|
+| 2600d parquet on disk | ✅ Exists (`data/crypto/ETHUSDT_5m_2600d.parquet`) |
+| Automated run | ❌ Blocked — oracle v0.2 `_find_eth_data()` unconditionally prefers 1300d |
+| Resolution | Requires oracle `--data-path` argument or manual rename of 1300d file (Phase 5C or standalone task) |
+
+The 2600d annex is **not a Phase 5B blocker.** It is a separate infrastructure task
+(oracle data path selection) if 2600d audit is required.
 
 ---
 
@@ -85,10 +111,11 @@ Current oracle remains at v0.2 with two configurable parameters (fast_days, slow
 
 ```
 Phase 5A status:      complete
+Phase 5B status:      complete
 Oracle v0.2:          accepted
 Default regime:       keep 50/200
 Sensitivity result:   20/100 and 100/300 rejected as baseline alternatives
+2600d annex:          blocked (oracle data-selection constraint)
 Promotion impact:     none
 Track A impact:       none
-Phase 5B:             not started
 ```

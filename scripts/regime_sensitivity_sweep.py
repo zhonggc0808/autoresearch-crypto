@@ -3,14 +3,15 @@
 
 Pure orchestration: calls the oracle as subprocess, never imports oracle internals.
 Each setting runs a full oracle evaluation; results are collected into a structured
-comparison report.
+comparison report with a PASS/REVIEW/FAIL verdict.
 
 Usage:
     uv run python scripts/regime_sensitivity_sweep.py
+    uv run python scripts/regime_sensitivity_sweep.py --days 2600
 
 Output:
     research_workspace/regime_sensitivity/
-        sensitivity_report.json    — structured comparison across all settings
+        sensitivity_report.json    — structured comparison with verdict
         results_comparison.tsv     — one-line-per-setting summary
         details_50_200.json        — raw oracle output per setting
         details_20_100.json
@@ -19,7 +20,9 @@ Output:
 
 from __future__ import annotations
 
+import argparse
 import csv
+import hashlib
 import json
 import subprocess
 import sys
@@ -32,6 +35,7 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 ORACLE_SCRIPT = str(PROJECT_DIR / "scripts" / "research_oracle.py")
 OUTPUT_DIR = PROJECT_DIR / "research_workspace" / "regime_sensitivity"
 ORACLE_DEFAULT_OUTPUT = PROJECT_DIR / "research_workspace" / "oracle_report.json"
+DEFAULT_DATA_DIR = PROJECT_DIR / "data" / "crypto"
 
 # Sweep sets: (label, fast_days, slow_days)
 SETTINGS: List[Tuple[str, int, int]] = [
@@ -56,6 +60,26 @@ def _now_iso() -> str:
 
 def _format_pct(val: float) -> str:
     return f"{val * 100:+.2f}%"
+
+
+def _resolve_data_path(days: int) -> str:
+    """Find expected parquet file path for given days, return path or empty."""
+    expected = DEFAULT_DATA_DIR / f"ETHUSDT_5m_{days}d.parquet"
+    if expected.exists():
+        return str(expected)
+    # Fallback: search for any ETHUSDT_5m file with matching days
+    for f in DEFAULT_DATA_DIR.glob(f"ETHUSDT_5m_{days}d.parquet"):
+        return str(f)
+    return ""
+
+
+def _file_hash(path: str) -> str:
+    """SHA256 short hash of a file."""
+    p = Path(path)
+    if not p.exists():
+        return ""
+    h = hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+    return f"sha256:{h}"
 
 
 def _run_one(label: str, fast_days: int, slow_days: int) -> Dict[str, Any]:
@@ -85,8 +109,59 @@ def _run_one(label: str, fast_days: int, slow_days: int) -> Dict[str, Any]:
     return report
 
 
+def _compute_verdict(settings_data: List[Dict[str, Any]]) -> Tuple[str, str]:
+    """Compute PASS/REVIEW/FAIL verdict from per-setting metrics.
+
+    PASS: default (50/200) has highest Sharpe AND its DD is not >5pp worse
+          than the best (highest/closest-to-zero) DD among all settings.
+    REVIEW: default Sharpe is not highest, or default DD is >5pp worse.
+    FAIL: default setting not found, or data inconsistency detected.
+    """
+    default = None
+    for s in settings_data:
+        if s["fast_days"] == 50 and s["slow_days"] == 200:
+            default = s
+            break
+    if default is None:
+        return "FAIL", "default 50/200 not found in sweep results"
+
+    # Sharpe: default must be highest
+    all_sharpes = [s["oos_sharpe"] for s in settings_data]
+    best_sharpe = max(all_sharpes)
+    default_sharpe_wins = abs(default["oos_sharpe"] - best_sharpe) < 1e-8
+
+    # DD: default must not be >5pp worse than best DD
+    # DD values are negative; "best" = highest (closest to zero)
+    all_dds = [s["oos_dd"] for s in settings_data]
+    best_dd = max(all_dds)
+    dd_gap = best_dd - default["oos_dd"]  # positive means default is worse
+    default_dd_ok = dd_gap <= 0.05
+
+    if default_sharpe_wins and default_dd_ok:
+        return (
+            "PASS",
+            f"default wins Sharpe ({default['oos_sharpe']:.2f}); "
+            f"DD within 5pp of best ({default['oos_dd']:.4f} vs {best_dd:.4f})",
+        )
+    elif not default_sharpe_wins:
+        return (
+            "REVIEW",
+            f"default Sharpe ({default['oos_sharpe']:.2f}) is not highest "
+            f"(best: {best_sharpe:.2f})",
+        )
+    else:
+        return (
+            "REVIEW",
+            f"default DD ({default['oos_dd']:.4f}) is >5pp worse "
+            f"than best ({best_dd:.4f})",
+        )
+
+
 def _compute_comparison(
     results: List[Tuple[str, int, int, Dict[str, Any]]],
+    data_days: int,
+    data_path: str,
+    data_hash: str,
 ) -> Dict[str, Any]:
     """Build structured comparison across all settings, keyed by setting label."""
     # Find default (50/200) as baseline for deltas
@@ -152,9 +227,20 @@ def _compute_comparison(
                 if isinstance(v, (int, float)) and isinstance(dv, (int, float)):
                     regime_shifts.setdefault(regime, {})[f"{fd}_{sd}"] = _format_pct(v - dv)
 
+    # Compute verdict
+    verdict, verdict_reason = _compute_verdict(settings_data)
+
     comparison: Dict[str, Any] = {
-        "timestamp": _now_iso(),
-        "checkpoint": CHECKPOINT,
+        "audit": {
+            "date": _now_iso(),
+            "oracle_version": settings_data[0]["oracle_version"],
+            "data_days": data_days,
+            "data_path": data_path,
+            "data_hash": data_hash,
+            "presets": [f"{fd}/{sd}" for _, fd, sd, _ in results],
+        },
+        "verdict": verdict,
+        "verdict_reason": verdict_reason,
         "settings": settings_data,
         "comparison": {
             "metric_deltas_vs_default": metric_deltas,
@@ -205,11 +291,59 @@ def _write_tsv(results: List[Tuple[str, int, int, Dict[str, Any]]]) -> None:
     print(f"    → {tsv_path}")
 
 
+def _print_summary(settings_data: List[Dict[str, Any]], verdict: str, verdict_reason: str) -> None:
+    """Print formatted summary table to console."""
+    print("\n" + "=" * 60)
+    print("  REGIME SENSITIVITY AUDIT SUMMARY")
+    print("=" * 60)
+    header = f"{'Setting':<12} {'OOS Return':>10} {'OOS DD':>10} {'Sharpe':>8} {'6m Min':>8} {'12m Min':>8}"
+    print(header)
+    print("-" * len(header))
+    for s in settings_data:
+        r6 = f"{s['rolling_6m_min']:.4f}" if s['rolling_6m_min'] is not None else "N/A"
+        r12 = f"{s['rolling_12m_min']:.4f}" if s['rolling_12m_min'] is not None else "N/A"
+        print(
+            f"{s['label']:<12}"
+            f" {s['oos_return']:>10.4f}"
+            f" {s['oos_dd']:>10.4f}"
+            f" {s['oos_sharpe']:>8.2f}"
+            f" {r6:>8}"
+            f" {r12:>8}"
+        )
+    print("-" * len(header))
+    dd_note = "(DD: higher/closer-to-zero = better)"
+    print(f"  {dd_note}")
+    print(f"\n  Verdict: {verdict} — {verdict_reason}")
+    print("=" * 60)
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Regime sensitivity sweep — PASS/REVIEW/FAIL audit across EMA presets",
+    )
+    parser.add_argument(
+        "--days", type=int, default=1300,
+        help="Expected data horizon in days (default: 1300). Used for validation "
+             "and traceability. The oracle uses whatever data it finds; the sweep "
+             "records the expected days, actual path, and hash for audit.",
+    )
+    args = parser.parse_args()
+
     print("=== Regime Sensitivity Sweep ===")
     print(f"  Checkpoint: {CHECKPOINT}")
     print(f"  Settings: {[f'{l} ({f}/{s})' for l, f, s in SETTINGS]}")
+    print(f"  Requested data: {args.days}d")
     print(f"  Output: {OUTPUT_DIR}")
+
+    # Resolve data path for traceability
+    data_path = _resolve_data_path(args.days)
+    data_hash = _file_hash(data_path) if data_path else ""
+    if data_path:
+        print(f"  Data: {data_path}")
+        print(f"  Hash: {data_hash}")
+    else:
+        print(f"  Data: ETHUSDT_5m_{args.days}d.parquet not found "
+              f"(oracle will use its default)")
     print()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -222,19 +356,27 @@ def main() -> int:
         results.append((label, fast, slow, report))
         print()
 
-    # Build and write comparison report
-    comparison = _compute_comparison(results)
+    # Build comparison with verdict
+    comparison = _compute_comparison(results, args.days, data_path, data_hash)
+
+    # Print inline summary
+    _print_summary(
+        comparison["settings"],
+        comparison["verdict"],
+        comparison["verdict_reason"],
+    )
+
+    # Write reports
     report_path = OUTPUT_DIR / "sensitivity_report.json"
     report_path.write_text(json.dumps(comparison, indent=2, default=str), encoding="utf-8")
-    print(f"  Report: {report_path}")
+    print(f"\n  Report: {report_path}")
 
-    # Write TSV
     _write_tsv(results)
 
     elapsed = time.time() - t0
     print(f"\nDone. Elapsed: {elapsed:.1f}s")
     print(f"Results in: {OUTPUT_DIR}")
-    return 0
+    return 0 if comparison["verdict"] in ("PASS", "REVIEW") else 1
 
 
 if __name__ == "__main__":
