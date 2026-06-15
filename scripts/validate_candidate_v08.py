@@ -24,10 +24,15 @@ from scripts.family_registry import get as _get_family
 from scripts.family_registry import is_valid as _valid_family
 from scripts.family_registry import list_families
 from scripts.validate_candidate_v02 import (
-    print_errors as _print_errors,
+    _check_dd_guard_values,
+    _check_execution_regime_filter_fast_slow,
+    _check_forbidden_content,
+    _check_forbidden_top_level_fields,
+    _check_id_uniqueness,
+    _check_regime_filter_fast_slow,
 )
 from scripts.validate_candidate_v02 import (
-    validate_candidate as _validate_v02_common,
+    print_errors as _print_errors,
 )
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -101,13 +106,22 @@ def validate_candidate(
         else:
             _validate_filter_block(flt, errors)
 
-    # --- Phase 4: Common v0.2 rules ---
-    common_errors = _validate_v02_common(
-        spec,
-        current_path=current_path,
-        check_uniqueness=check_uniqueness,
-    )
-    errors.extend(common_errors)
+    # --- Phase 4: Safety checks (forbidden content, uniqueness, regime filter) ---
+    # NOTE: We do NOT call _validate_v02_common() here because it runs the
+    # full v0.2 JSON Schema which rejects candidate_role=filter and the
+    # 'filter' field. Instead, we call only the individual safety checks.
+    _check_forbidden_content(spec, errors)
+    _check_forbidden_top_level_fields(spec, errors)
+    if check_uniqueness:
+        _check_id_uniqueness(spec.get("experiment_id", ""), errors, current_path=current_path)
+
+    params = spec.get("params", {})
+    _check_regime_filter_fast_slow(params, errors)
+
+    execution = spec.get("execution")
+    if execution is not None:
+        _check_execution_regime_filter_fast_slow(execution, errors)
+        _check_dd_guard_values(execution, errors)
 
     return errors
 

@@ -1,7 +1,12 @@
 {
   "type": "object",
-  "description": "Volatility gate filter parameters — applied on top of a base strategy",
+  "description": "Volatility gate filter parameters",
+  "required": ["family", "metric", "threshold", "action", "lookback"],
   "properties": {
+    "family": {
+      "const": "volatility_gate",
+      "description": "Filter family identifier"
+    },
     "metric": {
       "type": "string",
       "enum": ["atr_close_ratio", "atr_pct", "bb_width", "keltner_width"],
@@ -9,8 +14,8 @@
     },
     "threshold": {
       "type": "number",
-      "minimum": 0.01,
-      "maximum": 0.20,
+      "minimum": 0.001,
+      "maximum": 0.50,
       "description": "Threshold value for the metric to trigger the gate"
     },
     "action": {
@@ -20,11 +25,10 @@
     },
     "lookback": {
       "type": "integer",
-      "minimum": 12,
-      "maximum": 288,
+      "minimum": 5,
+      "maximum": 500,
       "description": "Lookback period (bars) for computing the volatility metric"
     }
   },
-  "required": ["metric", "threshold", "action", "lookback"],
   "additionalProperties": false
 }
