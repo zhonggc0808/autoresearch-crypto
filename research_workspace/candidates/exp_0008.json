@@ -1,0 +1,27 @@
+{
+  "experiment_id": "exp_0008",
+  "parent_id": "exp_0002",
+  "candidate_role": "standalone",
+  "strategy": "channel_breakout",
+  "description": "BEAR L250 + BULL/NEUTRAL 回 baseline 375 — 验证收益改善是否主要来自熊市通道缩短",
+  "params": {
+    "strategy_type": "regime_permission_channel_breakout",
+    "regime_change_policy": "permission_based",
+    "regime_filter": { "fast_days": 50, "slow_days": 200 },
+    "bull": {
+      "candidate": "U4_cons3",
+      "strategy_params": { "entry_lookback": 375, "min_hold_bars": 432, "enable_long": true, "enable_short": false },
+      "permission": { "allow_long": true, "allow_short": false, "close_below_ema_disables_long": true, "ema_fast": 50, "consecutive_below_ema_days": 3 }
+    },
+    "bear": {
+      "candidate": "K0_base_L250",
+      "strategy_params": { "entry_lookback": 250, "min_hold_bars": 432, "enable_long": true, "enable_short": true },
+      "permission": { "allow_long": true, "allow_short": true }
+    },
+    "neutral": {
+      "candidate": "N3_dir",
+      "strategy_params": { "entry_lookback": 375, "min_hold_bars": 432, "enable_long": true, "enable_short": true },
+      "permission": { "allow_long": true, "allow_short": true, "directional_only": true, "ema_fast": 50, "ema_slope_days": 5 }
+    }
+  }
+}
