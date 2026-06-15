@@ -121,10 +121,18 @@ def apply_volatility_gate(
             blocked = False
 
         if blocked:
-            if sig == 2 and position != 1:  # new long
-                sig = 1
-            elif sig == 3 and position != -1:  # new short
-                sig = 1
+            if action == "block_short_entries_when_high_vol":
+                if sig == 3 and position != -1:  # only block new shorts
+                    sig = 1
+            elif action == "block_long_entries_when_high_vol":
+                if sig == 2 and position != 1:  # only block new longs
+                    sig = 1
+            else:
+                # block all new entries
+                if sig == 2 and position != 1:
+                    sig = 1
+                elif sig == 3 and position != -1:
+                    sig = 1
 
         out[i] = sig
 

@@ -177,23 +177,20 @@ drawdown_guard, or cooldown_filter.
    or entry blocking conditional on market state.
    A regime_filter-only change does not count.
 
-10. **Volatility gate constraints (based on exp_0045).**
-    A simple high-volatility entry block alone is NOT sufficient —
-    it improved IS DD slightly (-50% → -43%) but made rolling 12m
-    and fee robustness WORSE. If proposing volatility_gate:
-    - Target a specific rolling-window loss regime with precision.
-    - Prefer lower-turnover exposure reduction over broad blocking.
-    - Justify why it preserves fee robustness.
-    - Do NOT re-use the same atr_close_ratio > 0.06 without a structural
-      change to entry/exit logic.
+10. **Volatility gate constraints (learned from exp_0045, exp_0046).**
+    - broad high-vol block: improved IS DD but killed rolling12m + fee.
+    - cooldown_after_drawdown: made EVERYTHING worse (DD, rolling, fee, return).
+      DO NOT continue close_drawdown cooldown filters.
+    NEW direction: directional (asymmetric) volatility gate.
+    Allowed volatility_gate actions:
+    - block_short_entries_when_high_vol (only block shorts, allow longs)
+    - block_long_entries_when_high_vol (only block longs, allow shorts)
+    Pick ONE direction. Do NOT block both sides.
 
-11. **Preferred filter directions (pick one):**
-    - block_entries_after_large_adverse_move (drawdown cooldown)
-    - reduce_position_when_high_vol (not full block, reduce size)
-    - block_only_new_shorts_when_high_vol (asymmetric gate)
-    - cooldown_after_drawdown (pause trading after DD spike)
-    Regular high-vol block atr_close_ratio > threshold is already tested
-    and failed — do not repeat it.
+11. **Preferred filter strategy:**
+    - Pick a directional volatility gate (above).
+    - Justify which side you're blocking and why.
+    - Do NOT propose broad two-sided entry blocks or drawdown cooldowns.
 
 12. **Correlation constraint:** target corr_vs_baseline < 0.85.
 

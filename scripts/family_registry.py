@@ -292,6 +292,8 @@ VOLATILITY_GATE = FamilyDefinition(
                 "block_entries_when_high_vol",
                 "block_entries_when_low_vol",
                 "reduce_position_size",
+                "block_short_entries_when_high_vol",
+                "block_long_entries_when_high_vol",
             ],
         ),
         "lookback": ParamDef(int, 12, 288),
