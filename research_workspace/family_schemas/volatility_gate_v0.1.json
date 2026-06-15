@@ -14,9 +14,9 @@
     },
     "threshold": {
       "type": "number",
-      "minimum": 0.001,
-      "maximum": 0.50,
-      "description": "Threshold value for the metric to trigger the gate"
+      "minimum": 0.0001,
+      "maximum": 0.10,
+      "description": "ATR/close ratio threshold. Calibrated on ETH 5m: p90=0.0039, p95=0.0047, p99=0.0069. Values >0.01 are no-op. Typical: 0.003-0.007"
     },
     "action": {
       "type": "string",

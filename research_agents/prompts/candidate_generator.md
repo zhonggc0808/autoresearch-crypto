@@ -177,20 +177,13 @@ drawdown_guard, or cooldown_filter.
    or entry blocking conditional on market state.
    A regime_filter-only change does not count.
 
-10. **Volatility gate learnings (exp_0045/46/47 — ALL killed).**
-    - broad high-vol block (exp_0045): DD slightly better, rolling+fee worse.
-    - cooldown_after_drawdown (exp_0046): EVERYTHING worse. DO NOT use.
-    - block_long_entries_when_high_vol (exp_0047): DD -64%, rolling -31%,
-      fee -65%. WORSE than broad block. DO NOT use.
-    LAST test: block_short_entries_when_high_vol ONLY.
-    Do NOT test block_long_entries_when_high_vol.
-    Do NOT test broad block_entries_when_high_vol.
-    Only action allowed: block_short_entries_when_high_vol.
+10. **ATR/close ratio calibration (ETH 5m, lookback 48).**
+    p90=0.0039, p95=0.0047, p97=0.0053, p99=0.0069, max=0.030.
+    threshold must be in [0.003, 0.007]. Below 0.003 is too wide; above 0.01 is no-op.
+    Default: 0.0047 (p95).
 
-11. **Constraint:**
-    - Use filter.family = volatility_gate.
-    - action MUST be block_short_entries_when_high_vol.
-    - Justify why blocking shorts (not longs) helps rolling12m and fee.
+11. Allowed action: block_short_entries_when_high_vol only.
+    Do NOT test block_long or broad block — already verified no-op.
 
 12. **Correlation constraint:** target corr_vs_baseline < 0.85.
 
