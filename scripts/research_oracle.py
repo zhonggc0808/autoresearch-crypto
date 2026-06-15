@@ -12,9 +12,9 @@ Usage:
     uv run python scripts/research_oracle.py \\
         --checkpoint checkpoints/eth_optimal.pt
 
-    # Evaluate a candidate YAML spec (Phase 3+)
+    # Evaluate a candidate params JSON (Phase 3 read-only loop)
     uv run python scripts/research_oracle.py \\
-        --candidate research_workspace/candidates/exp_0001.yaml
+        --candidate research_workspace/candidates/exp_0001.json
 
 Outputs:
     oracle_report.json                — full structured output
@@ -625,7 +625,18 @@ def run_oracle(
         else:
             _is_frozen_baseline = False
     elif candidate_path:
-        raise NotImplementedError("Candidate YAML evaluation is Phase 3+")
+        # Phase 3 read-only candidate evaluation.
+        # Load candidate params JSON (same format as frozen baseline JSON).
+        # Supports both standalone and filter/overlay roles.
+        cpath = Path(candidate_path)
+        if not cpath.exists():
+            raise FileNotFoundError(f"Candidate file not found: {candidate_path}")
+        raw = json.loads(cpath.read_text(encoding="utf-8"))
+        # Support both nested (with "params" key) and flat formats
+        checkpoint = raw.get("params") if isinstance(raw, dict) and "params" in raw else raw
+        is_v21 = _is_v21_checkpoint(checkpoint)
+        checkpoint_hash = _file_hash(cpath)
+        _is_frozen_baseline = False
     else:
         raise ValueError("Either --checkpoint, --baseline, or --candidate is required")
 
@@ -915,7 +926,7 @@ def main():
     )
     parser.add_argument(
         "--candidate", type=str, default=None,
-        help="Path to a YAML candidate spec (Phase 3+).",
+        help="Path to a candidate params JSON (Phase 3 read-only).",
     )
     parser.add_argument(
         "--no-write", action="store_true",

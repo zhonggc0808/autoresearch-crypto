@@ -1,0 +1,30 @@
+{
+  "experiment_id": "exp_0003",
+  "parent_id": null,
+  "candidate_role": "standalone",
+  "strategy": "channel_breakout",
+  "description": "牛市放宽通道 entry_lookback=800 减少信号切换，熊市保持 375",
+  "params": {
+    "strategy_type": "regime_permission_channel_breakout",
+    "regime_change_policy": "permission_based",
+    "regime_filter": { "fast_days": 50, "slow_days": 200 },
+    "bull": {
+      "candidate": "U4_cons3_L800",
+      "description": "800/432 long-only; wider channel in bull to reduce noise",
+      "strategy_params": { "entry_lookback": 800, "min_hold_bars": 432, "enable_long": true, "enable_short": false },
+      "permission": { "allow_long": true, "allow_short": false, "close_below_ema_disables_long": true, "ema_fast": 50, "consecutive_below_ema_days": 3 }
+    },
+    "bear": {
+      "candidate": "K0_base",
+      "description": "375/432 dual",
+      "strategy_params": { "entry_lookback": 375, "min_hold_bars": 432, "enable_long": true, "enable_short": true },
+      "permission": { "allow_long": true, "allow_short": true }
+    },
+    "neutral": {
+      "candidate": "N3_dir",
+      "description": "375/432 directional only",
+      "strategy_params": { "entry_lookback": 375, "min_hold_bars": 432, "enable_long": true, "enable_short": true },
+      "permission": { "allow_long": true, "allow_short": true, "directional_only": true, "ema_fast": 50, "ema_slope_days": 5 }
+    }
+  }
+}
