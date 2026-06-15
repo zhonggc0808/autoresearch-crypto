@@ -77,7 +77,7 @@ v0.1.0 behavior exactly. No existing scripts break.
 
 ### 2. Parameter Threading
 
-`fast_days` and `slow_days` flow through 4 call sites:
+`fast_days` and `slow_days` flow through 3 call sites (plus 1 explicit no-change):
 
 ```
 main()
@@ -88,14 +88,16 @@ main()
        ├─ Phase 3B filter branch
        │    └─ build_daily_regime_labels(df, fast_days, slow_days)    [2]
        │
-       ├─ Pre-compute regimes (FULL data)
-       │    └─ build_daily_regime_labels(df_full, fast_days, slow_days)  [3]
-       │
-       └─ (second pre-compute pass at line ~681)
-            └─ build_daily_regime_labels(df_full, fast_days, slow_days)  [4]
+       └─ Pre-compute regimes (FULL data, line ~681)
+            └─ build_daily_regime_labels(df_full, fast_days, slow_days)  [3]
 ```
 
 All calls use the same `fast_days`/`slow_days` pair. No partial application.
+
+**Note on [2] vs [3]**: The Phase 3B path [2] runs only when `--candidate`
+supplies a filter config. Line 681 (site [3]) then unconditionally overwrites
+`regimes_full`, so [2] and [3] are never both live. Both still receive the
+same `fast_days`/`slow_days` for correctness under either path.
 
 ### 3. Oracle Version and Parameter Recording
 
@@ -150,8 +152,9 @@ New test: `test_v02_default_parity()`
 
 ### 5. Sensitivity Sweep Script (`scripts/regime_sensitivity_sweep.py`)
 
-Pure orchestration. The oracle is called as a subprocess or through its Python
-API for each parameter set.
+Pure orchestration. The oracle is called as a subprocess
+(`uv run python scripts/research_oracle.py ...`) for each parameter set.
+The sweep script does **not** import or call oracle internals.
 
 **Sweep sets**:
 
@@ -229,11 +232,11 @@ details_100_300.json
 ## Files Not Created or Modified (Affirmation)
 
 The following check verifies the no-touch list is mechanically enforced:
-- `scripts/research_oracle.py` — only file modified
-- `scripts/regime_sensitivity_sweep.py` — created
-- `tests/test_research_oracle.py` — modified for parity test only
+- `scripts/research_oracle.py` — only existing production/oracle file modified
+- `tests/test_research_oracle.py` — modified for parity coverage
+- `scripts/regime_sensitivity_sweep.py` — created as orchestration only
 - Files outside this set are not touched, including all no-touch-list entries
-- The sweep script reads oracle output files; it does not import or call oracle internals
+- The sweep script calls oracle via subprocess; it does not import or call oracle internals
 
 ## Return Criteria (Pass/Fail)
 
