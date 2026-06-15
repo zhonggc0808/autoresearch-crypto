@@ -14,6 +14,8 @@ import tempfile
 import shutil
 from pathlib import Path
 
+import pandas as pd
+
 import numpy as np
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -214,6 +216,73 @@ def test_adx_filter_unknown_type_raises():
     print("  [PASS] Unknown filter type raises ValueError")
 
 
+# --- Phase 5A: v0.2 parity test ---
+
+def test_v02_default_parity():
+    """v0.2 default 50/200: metrics match v0.1.0 fixture, regime path stable under 50/200."""
+    # --- Load frozen v0.1.0 baseline fixture ---
+    v010_path = research_oracle.BASELINE_DIR / f"{research_oracle.BASELINE_ID}_oracle_v0.1.0.json"
+    assert v010_path.exists(), f"v0.1.0 fixture not found: {v010_path}"
+    v010 = json.loads(v010_path.read_text())
+
+    # --- Run v0.2 oracle with defaults (50/200) ---
+    result = research_oracle.run_oracle(checkpoint_path=CKPT, fast_days=50, slow_days=200)
+
+    # --- 1. OOS metrics parity against v0.1.0 fixture (1e-8) ---
+    for metric in ["return", "dd", "sharpe"]:
+        v2_val = result["metrics"]["oos"]["raw"][metric]
+        v1_val = v010["metrics"]["oos"]["raw"][metric]
+        assert abs(v2_val - v1_val) < 1e-8, \
+            f"OOS {metric} mismatch: v0.2={v2_val} vs v0.1.0={v1_val}"
+
+    # --- 2. IS metrics parity against v0.1.0 fixture (1e-8) ---
+    for metric in ["return", "dd", "sharpe"]:
+        v2_val = result["metrics"]["is"]["raw"][metric]
+        v1_val = v010["metrics"]["is"]["raw"][metric]
+        assert abs(v2_val - v1_val) < 1e-8, \
+            f"IS {metric} mismatch: v0.2={v2_val} vs v0.1.0={v1_val}"
+
+    # --- 3. Regime-derived metric parity against v0.1.0 fixture (1e-6) ---
+    for regime in ["bull", "bear", "neutral"]:
+        v2_r = result["metrics"]["regime"].get(regime, {}).get("return", 0)
+        v1_r = v010["metrics"]["regime"].get(regime, {}).get("return", 0)
+        assert abs(v2_r - v1_r) < 1e-6, \
+            f"Regime {regime} return mismatch: v0.2={v2_r} vs v0.1.0={v1_r}"
+
+    # --- 4. Signal pipeline determinism under 50/200 ---
+    # Generate signals twice and verify they match
+    from dex.checkpoints import load_checkpoint
+    ckpt_local = load_checkpoint(CKPT)
+    data_path = research_oracle._find_eth_data()
+    df_is, df_oos, _ = research_oracle._load_and_split_data(data_path)
+    df_full = pd.concat([df_is, df_oos], ignore_index=True)
+    signals_a = research_oracle._generate_v21_signals(
+        ckpt_local, df_full, fast_days=50, slow_days=200,
+    )
+    signals_b = research_oracle._generate_v21_signals(
+        ckpt_local, df_full, fast_days=50, slow_days=200,
+    )
+    hash_a = hashlib.sha256(signals_a.tobytes()).hexdigest()[:16]
+    hash_b = hashlib.sha256(signals_b.tobytes()).hexdigest()[:16]
+    assert hash_a == hash_b, "Signal pipeline not deterministic under 50/200"
+    # Verify the hash discriminates different params
+    signals_alt = research_oracle._generate_v21_signals(
+        ckpt_local, df_full, fast_days=20, slow_days=100,
+    )
+    hash_alt = hashlib.sha256(signals_alt.tobytes()).hexdigest()[:16]
+    assert hash_a != hash_alt, "Different regime params produced same signal hash"
+
+    # --- 5. Version field is NOT compared (expected to differ) ---
+    assert result["oracle_version"] == "v0.2"
+    assert v010.get("oracle_version") == "v0.1.0"
+
+    # --- 6. Verify v0.2 oracle metadata block ---
+    assert result["oracle"]["regime_filter"]["fast_days"] == 50
+    assert result["oracle"]["regime_filter"]["slow_days"] == 200
+
+    print("  [PASS] v0.2 default 50/200 parity against v0.1.0 fixture")
+
+
 # --- Runner ---
 
 if __name__ == "__main__":
@@ -237,6 +306,7 @@ if __name__ == "__main__":
         ("ADX case-insensitive", test_adx_filter_case_insensitive),
         ("ADX apply_to subset", test_adx_filter_apply_to_subset),
         ("ADX unknown type error", test_adx_filter_unknown_type_raises),
+        ("v0.2 parity", test_v02_default_parity),
     ]
 
     failed = 0
