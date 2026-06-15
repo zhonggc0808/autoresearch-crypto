@@ -6,7 +6,7 @@ Runner script: loads context → calls LLM → validates → persists/rejects.
 The LLM only proposes parameter changes. The runner:
     - Assigns experiment_id
     - Injects fixed fields (base, status, constraints, candidate_role, strategy)
-    - Validates via validate_candidate_v02
+    - Validates via validate_candidate_v08 (family-aware, supports filter/overlay)
     - Writes valid candidates to llm_candidates/
     - Writes rejected candidates to proposals/rejected_*.json
 
@@ -49,7 +49,7 @@ if str(PROJECT_DIR) not in sys.path:
 # ---------------------------------------------------------------------------
 
 from scripts.llm_client import call_llm
-from scripts.validate_candidate_v02 import validate_candidate
+from scripts.validate_candidate_v08 import validate_candidate
 
 # ---------------------------------------------------------------------------
 # Paths
