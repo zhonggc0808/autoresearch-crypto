@@ -1260,20 +1260,21 @@ def check_stop_loss(state, current_price, stop_loss_pct=0.03, max_hold_bars=48):
     entry_bar = state.get("entry_bar", 0)
     current_bar = state.get("bar_count", 0)
 
-    if pos == 1:
-        # 多头止损：价格下跌超过阈值
-        if entry_price > 0 and (entry_price - current_price) / entry_price >= stop_loss_pct:
-            return (
-                True,
-                f"多头止损: 跌幅 {(entry_price - current_price) / entry_price * 100:.2f}% >= {stop_loss_pct * 100:.0f}%",
-            )
-    elif pos == -1:
-        # 空头止损：价格上涨超过阈值
-        if entry_price > 0 and (current_price - entry_price) / entry_price >= stop_loss_pct:
-            return (
-                True,
-                f"空头止损: 涨幅 {(current_price - entry_price) / entry_price * 100:.2f}% >= {stop_loss_pct * 100:.0f}%",
-            )
+    if stop_loss_pct > 0:
+        if pos == 1:
+            # 多头止损：价格下跌超过阈值
+            if entry_price > 0 and (entry_price - current_price) / entry_price >= stop_loss_pct:
+                return (
+                    True,
+                    f"多头止损: 跌幅 {(entry_price - current_price) / entry_price * 100:.2f}% >= {stop_loss_pct * 100:.0f}%",
+                )
+        elif pos == -1:
+            # 空头止损：价格上涨超过阈值
+            if entry_price > 0 and (current_price - entry_price) / entry_price >= stop_loss_pct:
+                return (
+                    True,
+                    f"空头止损: 涨幅 {(current_price - entry_price) / entry_price * 100:.2f}% >= {stop_loss_pct * 100:.0f}%",
+                )
 
     if current_bar - entry_bar >= max_hold_bars:
         pos_name = "多头" if pos == 1 else "空头"
@@ -1768,7 +1769,7 @@ def main():
     )
     parser.add_argument("--live", action="store_true", help="实盘交易（真钱！确认策略稳定后再用）")
     parser.add_argument("--once", action="store_true", help="只运行一次然后退出")
-    parser.add_argument("--stop-loss", type=float, default=0.03, help="止损百分比（默认 3%%）")
+    parser.add_argument("--stop-loss", type=float, default=0.0, help="止损百分比（默认关闭）")
     parser.add_argument("--max-hold", type=int, default=48, help="最大持仓K线数（默认 48）")
     parser.add_argument("--short", action="store_true", default=True, help="启用做空（默认开启）")
     parser.add_argument("--long-only", action="store_true", help="只做多，不做空")
