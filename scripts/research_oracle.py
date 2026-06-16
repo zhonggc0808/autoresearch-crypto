@@ -27,7 +27,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -36,14 +35,17 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import torch
 
 # Ensure project root is on sys.path
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
-from dex.checkpoints import STRATEGY_ALIASES, load_checkpoint
+from dex.checkpoints import (
+    build_channel_breakout_strategy_from_checkpoint,
+    is_regime_channel_breakout_checkpoint,
+    load_checkpoint,
+)
 from dex.config import (
     BARS_PER_DAY_5M,
     BARS_PER_YEAR,
@@ -51,7 +53,9 @@ from dex.config import (
     INITIAL_CAPITAL,
     SLIPPAGE,
 )
-from dex.data import list_crypto_files, load_crypto_data
+from dex.data import load_crypto_data
+from dex.exit_overlays import apply_exit_overlays
+from dex.filters import build_filter_from_config
 from dex.indicators import compute_adx
 from dex.regime_filter import (
     apply_regime_short_filter,
@@ -64,9 +68,7 @@ from dex.regime_permissions import (
     compute_daily_indicators,
     route_regime_signals,
 )
-from dex.filters import build_filter_from_config
 from dex.strategies.base import StrategyEvaluator
-from dex.strategies.channel_breakout import ChannelBreakoutTrendStrategy
 from dex.strategy_signals import generate_strategy_signals
 
 # ---------------------------------------------------------------------------
@@ -241,9 +243,9 @@ def _generate_v21_signals(
     This reconstructs the multi-regime channel breakout with permission
     overlays exactly as used by v2.1 balanced.
     """
-    bull_s = ChannelBreakoutTrendStrategy(**checkpoint["bull"]["strategy_params"])
-    bear_s = ChannelBreakoutTrendStrategy(**checkpoint["bear"]["strategy_params"])
-    neutral_s = ChannelBreakoutTrendStrategy(**checkpoint["neutral"]["strategy_params"])
+    bull_s = build_channel_breakout_strategy_from_checkpoint(checkpoint, "bull")
+    bear_s = build_channel_breakout_strategy_from_checkpoint(checkpoint, "bear")
+    neutral_s = build_channel_breakout_strategy_from_checkpoint(checkpoint, "neutral")
 
     bull_cfg = RiskOffConfig(**checkpoint["bull"]["permission"])
     bear_cfg = RiskOffConfig(**checkpoint["bear"]["permission"])
@@ -266,6 +268,7 @@ def _generate_v21_signals(
         df, regimes, bull_cfg, bear_cfg, neutral_cfg, daily_ctx, adx_full
     )
     final_signals = apply_permission_arrays(routed, al, as_arr, ff, eo)
+    final_signals = apply_exit_overlays(final_signals, df, regimes, checkpoint.get("exit_logic"))
     return final_signals
 
 
@@ -479,7 +482,7 @@ def _print_filter_diag(filter_fn: callable) -> None:
     diag = getattr(filter_fn, "diag", None)
     if not diag:
         return
-    print(f"\n--- Filter Diagnostics ---")
+    print("\n--- Filter Diagnostics ---")
     for key in ("high_vol_bars", "neutral_bars",
                 "attempted_long_entries", "attempted_short_entries",
                 "blocked_long_entries", "blocked_short_entries", "signals_changed_total"):
@@ -608,12 +611,7 @@ def _compute_flags(
 
 def _is_v21_checkpoint(checkpoint: Dict[str, Any]) -> bool:
     """Detect v2.1 regime-permission checkpoint format."""
-    return (
-        checkpoint.get("strategy_type") == "regime_permission_channel_breakout"
-        and "bull" in checkpoint
-        and "bear" in checkpoint
-        and "neutral" in checkpoint
-    )
+    return is_regime_channel_breakout_checkpoint(checkpoint)
 
 
 def run_oracle(
@@ -1005,7 +1003,7 @@ def main():
 
     print(f"=== Research Oracle {ORACLE_VERSION} ===")
     if args.baseline:
-        print(f"  Mode: baseline (frozen JSON params)")
+        print("  Mode: baseline (frozen JSON params)")
     elif args.checkpoint:
         print(f"  Checkpoint: {args.checkpoint}")
     elif args.candidate:
@@ -1040,7 +1038,7 @@ def main():
     for k, v in m["oos"]["safe_execution"].items():
         print(f"  {k}: {v}")
     print()
-    print(f"--- Rolling ---")
+    print("--- Rolling ---")
     for k, v in m["rolling"].items():
         if "worst_bar" in k:
             continue
@@ -1049,12 +1047,12 @@ def main():
         else:
             print(f"  {k}: {v}")
     print()
-    print(f"--- Regime ---")
-    print(f"  (attribution: signal-isolated, not PnL-attributed)")
+    print("--- Regime ---")
+    print("  (attribution: signal-isolated, not PnL-attributed)")
     for regime, data in m["regime"].items():
         print(f"  {regime}: return={data['return']}, trades={data['trades']}, bars={data['bars']}")
     print()
-    print(f"--- Sensitivity ---")
+    print("--- Sensitivity ---")
     print(f"  IS  fees={m['sensitivity']['is']['fees']}")
     print(f"  OOS fees={m['sensitivity']['oos']['fees']}")
     print(f"  IS  slippage={m['sensitivity']['is']['slippage']}")
@@ -1063,7 +1061,7 @@ def main():
     corr = m.get("correlation", {}).get("vs_baseline", "N/A")
     print(f"  Correlation vs baseline: {corr}")
     print()
-    print(f"--- Flags ---")
+    print("--- Flags ---")
     print(f"  status: {f['status']}")
     if "baseline_known_risks" in f:
         print(f"  baseline_known_risks: {f['baseline_known_risks']}")

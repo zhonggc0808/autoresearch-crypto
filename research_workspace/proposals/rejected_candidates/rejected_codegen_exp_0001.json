@@ -1,0 +1,9 @@
+{
+  "codegen_id": "exp_0001",
+  "timestamp": "2026-06-16T08:39:03Z",
+  "rejection_reason": "static_scan_failed",
+  "errors": [
+    "Forbidden import: 'os' (line 1)"
+  ],
+  "strategy_name": "bad_strategy"
+}

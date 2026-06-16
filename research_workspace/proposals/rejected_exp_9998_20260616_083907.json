@@ -1,0 +1,9 @@
+{
+  "timestamp": "2026-06-16T08:39:07Z",
+  "experiment_id": "exp_9998",
+  "reason": "Non-JSON response from LLM",
+  "proposal": {
+    "experiment_id": "exp_9998"
+  },
+  "llm_response_raw": "not json at all"
+}

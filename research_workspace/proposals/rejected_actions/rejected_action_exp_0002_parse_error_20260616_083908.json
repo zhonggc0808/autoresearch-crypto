@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-06-16T08:39:08Z",
+  "experiment_id": "exp_0002",
+  "action": {
+    "action": "parse_error"
+  },
+  "errors": [
+    "Non-JSON response"
+  ],
+  "llm_response_raw": "not json at all"
+}

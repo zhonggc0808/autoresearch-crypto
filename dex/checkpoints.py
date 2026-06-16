@@ -12,10 +12,10 @@ from dex.strategies import (
     AdaptiveChannelBreakoutTrendStrategy,
     AdaptiveHybridStrategy,
     ChannelBreakoutTrendStrategy,
+    DirectionalTrendStrategy,
     GridStrategy,
     HybridMeanRevMomentumStrategy,
     HybridStrategy,
-    DirectionalTrendStrategy,
     LongBiasTrendStrategy,
     PureActionStrategy,
     RegimeStrategy,
@@ -58,6 +58,27 @@ STRATEGY_ALIASES: dict[str, type] = {
     "trendfollow": TrendFollowStrategy,
 }
 
+REGIME_CHANNEL_BREAKOUT_STRATEGY_TYPES = {
+    "regime_permission_channel_breakout",
+    "exit_logic_channel_breakout",
+}
+
+EXIT_LOGIC_STRATEGY_PARAM_FIELDS = (
+    "exit_lookback",
+    "take_profit_pct",
+    "stop_loss_pct",
+    "max_hold_bars",
+)
+
+PROFIT_LOCK_FIELD_MAP = {
+    "enabled": "profit_lock_enabled",
+    "activate_profit_pct": "profit_lock_activate_pct",
+    "giveback_ratio": "profit_lock_giveback_ratio",
+    "trailing_atr_multiplier": "profit_lock_atr_multiplier",
+    "atr_period": "profit_lock_atr_period",
+    "min_hold_bars_before_lock": "profit_lock_min_hold_bars",
+}
+
 
 def load_checkpoint(path: str | Path) -> dict[str, Any]:
     """Load a Torch checkpoint from disk."""
@@ -65,6 +86,66 @@ def load_checkpoint(path: str | Path) -> dict[str, Any]:
     if not isinstance(checkpoint, dict):
         raise ValueError(f"Checkpoint must contain a dict, got {type(checkpoint).__name__}")
     return checkpoint
+
+
+def is_regime_channel_breakout_checkpoint(checkpoint: Mapping[str, Any]) -> bool:
+    """Detect v2.1-compatible regime-routed ChannelBreakout checkpoint formats."""
+    return (
+        checkpoint.get("strategy_type") in REGIME_CHANNEL_BREAKOUT_STRATEGY_TYPES
+        and "bull" in checkpoint
+        and "bear" in checkpoint
+        and "neutral" in checkpoint
+    )
+
+
+def apply_exit_logic_to_strategy_params(
+    params: Mapping[str, Any],
+    exit_logic: Mapping[str, Any] | None,
+    regime: str | None = None,
+) -> dict[str, Any]:
+    """Return strategy params with optional top-level exit logic applied.
+
+    Family candidates keep exit research at checkpoint top level so the three
+    regime parameter blocks remain comparable. This helper translates that
+    overlay into the constructor fields consumed by ChannelBreakoutTrendStrategy.
+    """
+    merged = dict(params)
+    if not exit_logic:
+        return merged
+
+    for field in EXIT_LOGIC_STRATEGY_PARAM_FIELDS:
+        if field in exit_logic:
+            merged[field] = exit_logic[field]
+
+    _merge_profit_lock_params(merged, exit_logic.get("profit_lock"))
+
+    by_regime = exit_logic.get("profit_lock_by_regime")
+    if regime is not None and isinstance(by_regime, Mapping):
+        _merge_profit_lock_params(merged, by_regime.get(regime))
+
+    return merged
+
+
+def _merge_profit_lock_params(params: dict[str, Any], profit_lock: Any) -> None:
+    if not isinstance(profit_lock, Mapping):
+        return
+    for source, target in PROFIT_LOCK_FIELD_MAP.items():
+        if source in profit_lock:
+            params[target] = profit_lock[source]
+
+
+def build_channel_breakout_strategy_from_checkpoint(
+    checkpoint: Mapping[str, Any],
+    regime: str,
+) -> ChannelBreakoutTrendStrategy:
+    """Build a regime ChannelBreakout strategy with top-level exit overlays."""
+    regime_block = checkpoint[regime]
+    params = apply_exit_logic_to_strategy_params(
+        regime_block["strategy_params"],
+        checkpoint.get("exit_logic"),
+        regime=regime,
+    )
+    return ChannelBreakoutTrendStrategy(**params)
 
 
 def build_strategy_from_checkpoint(checkpoint: Mapping[str, Any]) -> Any:
@@ -113,6 +194,12 @@ def describe_strategy(strategy: Any, strategy_name: str) -> list[str]:
         "stop_loss_pct",
         "enable_short",
         "adx_threshold",
+        "profit_lock_enabled",
+        "profit_lock_activate_pct",
+        "profit_lock_giveback_ratio",
+        "profit_lock_atr_multiplier",
+        "profit_lock_atr_period",
+        "profit_lock_min_hold_bars",
     ]
     values = [f"{field}={getattr(strategy, field)}" for field in fields if hasattr(strategy, field)]
     return [f"策略模式: {strategy_name}", "参数: " + ", ".join(values)]

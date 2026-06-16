@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-06-16T08:39:08Z",
+  "experiment_id": "exp_0002",
+  "action": {
+    "action": "kill",
+    "source_candidate_id": "exp_0002",
+    "target_family": "channel_breakout",
+    "rationale": "Candidate failed 1300d with DD_OVER_50 and ROLLING_NEGATIVE. The regime filter is too sensitive, making the strategy untradable.",
+    "risk_note": "No further iteration recommended on this direction."
+  }
+}

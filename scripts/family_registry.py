@@ -194,7 +194,10 @@ def validate_allowed_change(family: str, ac: Dict[str, Any]) -> List[str]:
                 if st == "int":
                     if not isinstance(nv, int):
                         errors.append(f"allowed_change.{key}.{nk}: expected int")
-                    elif nv < spec.get("min", 0) or nv > spec.get("max", 999999):
+                    elif (
+                        nv not in spec.get("allowed_values", [])
+                        and (nv < spec.get("min", 0) or nv > spec.get("max", 999999))
+                    ):
                         errors.append(
                             f"allowed_change.{key}.{nk}: {nv} out of range "
                             f"[{spec['min']}, {spec['max']}]"
@@ -214,6 +217,82 @@ def validate_allowed_change(family: str, ac: Dict[str, Any]) -> List[str]:
                     enum_vals = spec.get("enum")
                     if enum_vals and nv not in enum_vals:
                         errors.append(f"allowed_change.{key}.{nk}: '{nv}' not in {enum_vals}")
+                elif st == "dict":
+                    if not isinstance(nv, dict):
+                        errors.append(f"allowed_change.{key}.{nk}: expected dict")
+                        continue
+                    nested_fields = spec.get("fields", {})
+                    for dk, dv in nv.items():
+                        if dk not in nested_fields:
+                            errors.append(f"allowed_change.{key}.{nk}.{dk}: unknown field")
+                            continue
+                        dspec = nested_fields[dk]
+                        dst = dspec.get("type", "")
+                        if dst == "int":
+                            if not isinstance(dv, int):
+                                errors.append(f"allowed_change.{key}.{nk}.{dk}: expected int")
+                            elif dv < dspec.get("min", 0) or dv > dspec.get("max", 999999):
+                                errors.append(
+                                    f"allowed_change.{key}.{nk}.{dk}: {dv} out of range "
+                                    f"[{dspec['min']}, {dspec['max']}]"
+                                )
+                        elif dst == "float":
+                            if not isinstance(dv, (int, float)):
+                                errors.append(f"allowed_change.{key}.{nk}.{dk}: expected number")
+                            elif dv < dspec.get("min", 0) or dv > dspec.get("max", 999999):
+                                errors.append(
+                                    f"allowed_change.{key}.{nk}.{dk}: {dv} out of range "
+                                    f"[{dspec['min']}, {dspec['max']}]"
+                                )
+                        elif dst == "bool":
+                            if not isinstance(dv, bool):
+                                errors.append(f"allowed_change.{key}.{nk}.{dk}: expected boolean")
+                        elif dst == "dict":
+                            if not isinstance(dv, dict):
+                                errors.append(f"allowed_change.{key}.{nk}.{dk}: expected dict")
+                                continue
+                            deep_fields = dspec.get("fields", {})
+                            for ek, ev in dv.items():
+                                if ek not in deep_fields:
+                                    errors.append(
+                                        f"allowed_change.{key}.{nk}.{dk}.{ek}: unknown field"
+                                    )
+                                    continue
+                                espec = deep_fields[ek]
+                                est = espec.get("type", "")
+                                if est == "int":
+                                    if not isinstance(ev, int):
+                                        errors.append(
+                                            f"allowed_change.{key}.{nk}.{dk}.{ek}: expected int"
+                                        )
+                                    elif ev < espec.get("min", 0) or ev > espec.get(
+                                        "max", 999999
+                                    ):
+                                        errors.append(
+                                            f"allowed_change.{key}.{nk}.{dk}.{ek}: "
+                                            f"{ev} out of range "
+                                            f"[{espec['min']}, {espec['max']}]"
+                                        )
+                                elif est == "float":
+                                    if not isinstance(ev, (int, float)):
+                                        errors.append(
+                                            f"allowed_change.{key}.{nk}.{dk}.{ek}: "
+                                            "expected number"
+                                        )
+                                    elif ev < espec.get("min", 0) or ev > espec.get(
+                                        "max", 999999
+                                    ):
+                                        errors.append(
+                                            f"allowed_change.{key}.{nk}.{dk}.{ek}: "
+                                            f"{ev} out of range "
+                                            f"[{espec['min']}, {espec['max']}]"
+                                        )
+                                elif est == "bool":
+                                    if not isinstance(ev, bool):
+                                        errors.append(
+                                            f"allowed_change.{key}.{nk}.{dk}.{ek}: "
+                                            "expected boolean"
+                                        )
         # Check flat fields
         elif key in fd.allowed_change:
             spec = fd.allowed_change[key]
@@ -257,21 +336,122 @@ EXIT_LOGIC_VARIANT = FamilyDefinition(
             "slow_days": {"type": "int", "min": 10, "max": 500},
         },
         "exit_logic": {
-            "exit_lookback": {"type": "int", "min": 12, "max": 1440},
+            "exit_lookback": {"type": "int", "min": 12, "max": 1440, "allowed_values": [0]},
             "take_profit_pct": {"type": "float", "min": 0.01, "max": 0.50},
             "stop_loss_pct": {"type": "float", "min": 0.01, "max": 0.30},
             "max_hold_bars": {"type": "int", "min": 12, "max": 2880},
             "trailing_stop": {"type": "bool"},
+            "profit_lock": {
+                "type": "dict",
+                "fields": {
+                    "enabled": {"type": "bool"},
+                    "activate_profit_pct": {"type": "float", "min": 0.0, "max": 0.50},
+                    "giveback_ratio": {"type": "float", "min": 0.0, "max": 1.0},
+                    "trailing_atr_multiplier": {"type": "float", "min": 0.0, "max": 10.0},
+                    "atr_period": {"type": "int", "min": 2, "max": 100},
+                    "min_hold_bars_before_lock": {"type": "int", "min": 0, "max": 2880},
+                },
+            },
+            "profit_lock_by_regime": {
+                "type": "dict",
+                "fields": {
+                    "bull": {
+                        "type": "dict",
+                        "fields": {
+                            "enabled": {"type": "bool"},
+                            "activate_profit_pct": {"type": "float", "min": 0.0, "max": 0.50},
+                            "giveback_ratio": {"type": "float", "min": 0.0, "max": 1.0},
+                            "trailing_atr_multiplier": {
+                                "type": "float",
+                                "min": 0.0,
+                                "max": 10.0,
+                            },
+                            "atr_period": {"type": "int", "min": 2, "max": 100},
+                            "min_hold_bars_before_lock": {
+                                "type": "int",
+                                "min": 0,
+                                "max": 2880,
+                            },
+                        },
+                    },
+                    "bear": {
+                        "type": "dict",
+                        "fields": {
+                            "enabled": {"type": "bool"},
+                            "activate_profit_pct": {"type": "float", "min": 0.0, "max": 0.50},
+                            "giveback_ratio": {"type": "float", "min": 0.0, "max": 1.0},
+                            "trailing_atr_multiplier": {
+                                "type": "float",
+                                "min": 0.0,
+                                "max": 10.0,
+                            },
+                            "atr_period": {"type": "int", "min": 2, "max": 100},
+                            "min_hold_bars_before_lock": {
+                                "type": "int",
+                                "min": 0,
+                                "max": 2880,
+                            },
+                        },
+                    },
+                    "neutral": {
+                        "type": "dict",
+                        "fields": {
+                            "enabled": {"type": "bool"},
+                            "activate_profit_pct": {"type": "float", "min": 0.0, "max": 0.50},
+                            "giveback_ratio": {"type": "float", "min": 0.0, "max": 1.0},
+                            "trailing_atr_multiplier": {
+                                "type": "float",
+                                "min": 0.0,
+                                "max": 10.0,
+                            },
+                            "atr_period": {"type": "int", "min": 2, "max": 100},
+                            "min_hold_bars_before_lock": {
+                                "type": "int",
+                                "min": 0,
+                                "max": 2880,
+                            },
+                        },
+                    },
+                },
+            },
+            "mature_trend_exit": {
+                "type": "dict",
+                "fields": {
+                    "enabled": {"type": "bool"},
+                    "activate_mfe_pct": {"type": "float", "min": 0.0, "max": 5.0},
+                    "daily_ema_period": {"type": "int", "min": 2, "max": 200},
+                    "use_completed_daily_bar": {"type": "bool"},
+                    "min_hold_bars_before_exit": {"type": "int", "min": 0, "max": 2880},
+                },
+            },
+            "bear_cooldown": {
+                "type": "dict",
+                "fields": {
+                    "enabled": {"type": "bool"},
+                    "loss_streak": {"type": "int", "min": 1, "max": 10},
+                    "cooldown_bars": {"type": "int", "min": 1, "max": 2880},
+                    "cooldown_days": {"type": "int", "min": 1, "max": 30},
+                },
+            },
         },
     },
     search_space_text=(
         "entry_lookback: [20, 1000], default 375\n"
         "min_hold_bars: [12, 1440], default 432\n"
-        "exit_logic.exit_lookback: [12, 1440], default 288\n"
+        "exit_logic.exit_lookback: 0(off) or [12, 1440], default 288\n"
         "exit_logic.take_profit_pct: [0.01, 0.50], default 0.05\n"
         "exit_logic.stop_loss_pct: [0.01, 0.30], default 0.10\n"
         "exit_logic.max_hold_bars: [12, 2880], default 720\n"
         "exit_logic.trailing_stop: true | false, default true\n"
+        "exit_logic.profit_lock.enabled: true | false, default false\n"
+        "exit_logic.profit_lock.activate_profit_pct: [0.0, 0.50], default 0.08\n"
+        "exit_logic.profit_lock.giveback_ratio: [0.0, 1.0], default 0.35\n"
+        "exit_logic.profit_lock.trailing_atr_multiplier: [0.0, 10.0], default 3.0\n"
+        "exit_logic.profit_lock_by_regime.{bull,bear,neutral}: optional overrides\n"
+        "exit_logic.mature_trend_exit.activate_mfe_pct: [0.0, 5.0], default 1.20\n"
+        "exit_logic.mature_trend_exit.daily_ema_period: [2, 200], default 20\n"
+        "exit_logic.bear_cooldown.loss_streak: [1, 10], default 2\n"
+        "exit_logic.bear_cooldown.cooldown_bars: [1, 2880], default 864\n"
         "regime_filter.fast_days: [5, 200], default 50\n"
         "regime_filter.slow_days: [10, 500], default 200"
     ),

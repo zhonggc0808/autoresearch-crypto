@@ -1,0 +1,102 @@
+{
+  "experiment_id": "exp_0024_mature_guard_bear_cooldown",
+  "parent_id": "channel_breakout_v2_1_balanced",
+  "candidate_role": "standalone",
+  "strategy": "exit_logic_variant",
+  "description": "MTG+BCD-1: combines mature trend guard MFE-M4 with BEAR-only cooldown for v2.1 ChannelBreakout.",
+  "hypothesis": "Baseline v2.1 drawdown has two root causes: mature trend profit giveback and BEAR repeated breakout failure. Combining MTG with a short BEAR cooldown should reduce both without suppressing the core ChannelBreakout alpha.",
+  "expected_behavior_change": "Mature high-MFE trends exit on completed daily EMA20 damage, while BEAR trading pauses after consecutive realized failures. Should improve IS DD and OOS Sharpe if both diagnosed risk sources are stable.",
+  "base": "v2.1_balanced",
+  "status": "research_only",
+  "constraints": [
+    "no_future_data",
+    "uses_completed_daily_bar",
+    "inherits_v21_risk",
+    "no_demo_routing",
+    "research_only"
+  ],
+  "params": {
+    "strategy_type": "exit_logic_channel_breakout",
+    "regime_change_policy": "permission_based",
+    "regime_filter": {
+      "fast_days": 50,
+      "slow_days": 200
+    },
+    "exit_logic": {
+      "exit_lookback": 0,
+      "take_profit_pct": 0.05,
+      "stop_loss_pct": 0.1,
+      "max_hold_bars": 720,
+      "trailing_stop": true,
+      "profit_lock": {
+        "enabled": false,
+        "activate_profit_pct": 0.2,
+        "giveback_ratio": 0.8,
+        "trailing_atr_multiplier": 0.0,
+        "atr_period": 14,
+        "min_hold_bars_before_lock": 0
+      },
+      "mature_trend_exit": {
+        "enabled": true,
+        "activate_mfe_pct": 1.2,
+        "daily_ema_period": 20,
+        "use_completed_daily_bar": true,
+        "min_hold_bars_before_exit": 0
+      },
+      "bear_cooldown": {
+        "enabled": true,
+        "loss_streak": 2,
+        "cooldown_bars": 864,
+        "scope": "bear_entry_trades"
+      }
+    },
+    "bull": {
+      "candidate": "U4_cons3_MTG",
+      "description": "375/432 long-only; daily close below EMA50 for 3 completed days disables/closes long; mature trend guard overlay",
+      "strategy_params": {
+        "entry_lookback": 375,
+        "min_hold_bars": 432,
+        "enable_long": true,
+        "enable_short": false
+      },
+      "permission": {
+        "allow_long": true,
+        "allow_short": false,
+        "close_below_ema_disables_long": true,
+        "ema_fast": 50,
+        "consecutive_below_ema_days": 3
+      }
+    },
+    "bear": {
+      "candidate": "K0_base_MTG_BCD1",
+      "description": "375/432 dual with mature trend guard and BEAR cooldown after two consecutive losing BEAR-entry trades",
+      "strategy_params": {
+        "entry_lookback": 375,
+        "min_hold_bars": 432,
+        "enable_long": true,
+        "enable_short": true
+      },
+      "permission": {
+        "allow_long": true,
+        "allow_short": true
+      }
+    },
+    "neutral": {
+      "candidate": "N3_dir_MTG",
+      "description": "375/432 directional; long/short only when close and EMA50 slope agree; mature trend guard overlay",
+      "strategy_params": {
+        "entry_lookback": 375,
+        "min_hold_bars": 432,
+        "enable_long": true,
+        "enable_short": true
+      },
+      "permission": {
+        "allow_long": true,
+        "allow_short": true,
+        "directional_only": true,
+        "ema_fast": 50,
+        "ema_slope_days": 5
+      }
+    }
+  }
+}

@@ -3,7 +3,7 @@ param(
     [string]$Symbol = "ETH-USDT-SWAP",
     [string]$Interval = "5m",
     [double]$Capital = 4500.0,
-    [double]$Leverage = 1.0,
+    [double]$Leverage = 5.0,
     [ValidateSet("cross", "isolated")]
     [string]$MarginMode = "cross",
     [switch]$Once,

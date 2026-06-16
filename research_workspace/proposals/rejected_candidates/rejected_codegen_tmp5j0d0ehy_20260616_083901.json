@@ -1,0 +1,9 @@
+{
+  "codegen_id": "tmp5j0d0ehy",
+  "timestamp": "2026-06-16T08:39:01Z",
+  "rejection_reason": "Static scan failed",
+  "errors": [
+    "Forbidden import: 'os' (line 1)"
+  ],
+  "strategy_name": "ema_cross_test"
+}

@@ -1,0 +1,48 @@
+{
+  "timestamp": "2026-06-16T08:39:08Z",
+  "review": {
+    "review_id": "meta_9999",
+    "window": {
+      "runs_analyzed": 20,
+      "candidates_analyzed": 12
+    },
+    "findings": [
+      {
+        "type": "failure_pattern",
+        "severity": "high",
+        "summary": "Fast regime filters consistently increase drawdown without improving returns across 5+ candidates.",
+        "evidence": [
+          "exp_0001: DD_OVER_50",
+          "exp_0005: ROLLING_NEGATIVE"
+        ]
+      },
+      {
+        "type": "stuck_loop",
+        "severity": "medium",
+        "summary": "Fork chain shows 3 consecutive entries without changing entry_lookback. Parameter is stuck at 375.",
+        "evidence": [
+          "exp_0018 -> exp_0019 -> exp_0020: all entry_lookback=375"
+        ]
+      }
+    ],
+    "recommendations": [
+      {
+        "target": "search_space",
+        "action": "narrow",
+        "proposal": "Temporarily deprioritize regime_filter fast_days below 30. None of the 6 candidates with fast_days<30 improved results.",
+        "rationale": "Fast regime filters increase turnover without improving DD or returns."
+      },
+      {
+        "target": "prompt",
+        "action": "modify",
+        "proposal": "Add explicit warning in candidate_generator prompt: 'Do not set fast_days below 30 without strong justification.'",
+        "rationale": "Generator keeps proposing fast regime filters despite consistent failures."
+      }
+    ],
+    "contract_changes": [],
+    "prompt_changes": [
+      "Add anti-fast-regime-filter guidance to candidate_generator.md"
+    ],
+    "requires_human_review": true
+  }
+}

@@ -28,7 +28,6 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # config
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -222,7 +221,10 @@ def _build_per_day_lookups(daily_ctx: dict) -> dict:
         day_ema100[day] = float(daily_ctx["ema100"].iloc[prev]) if prev < len(daily_ctx["ema100"]) else float("nan")
         day_slope[day] = float(daily_ctx["slope"].iloc[prev]) if prev < len(daily_ctx["slope"]) else float("nan")
         day_peak[day] = float(daily_ctx["peak90"].iloc[prev]) if prev < len(daily_ctx["peak90"]) else float("nan")
-        day_consec[day] = int(daily_ctx["consecutive_below"].iloc[prev]) if prev < len(daily_ctx["consecutive_below"]) else 0
+        # ``consecutive_below`` is already computed as the streak completed
+        # through the previous daily candle for this day, so applying ``prev``
+        # here would add a second day of lag.
+        day_consec[day] = int(daily_ctx["consecutive_below"].iloc[i]) if i < len(daily_ctx["consecutive_below"]) else 0
 
     return {"close": day_close, "ema50": day_ema50, "ema100": day_ema100,
             "slope": day_slope, "peak": day_peak, "consecutive_below": day_consec}
@@ -311,10 +313,16 @@ def build_permission_arrays(
         regime = str(regimes[i])
         cfg = {"BULL": bull_cfg, "BEAR": bear_cfg, "NEUTRAL": neutral_cfg}.get(regime)
         if cfg is None:
-            allow_long[i] = 0; allow_short[i] = 0; force_flat[i] = 1; continue
+            allow_long[i] = 0
+            allow_short[i] = 0
+            force_flat[i] = 1
+            continue
 
         if cfg.force_flat:
-            allow_long[i] = 0; allow_short[i] = 0; force_flat[i] = 1; continue
+            allow_long[i] = 0
+            allow_short[i] = 0
+            force_flat[i] = 1
+            continue
 
         allow_long[i] = 1 if cfg.allow_long else 0
         allow_short[i] = 1 if cfg.allow_short else 0
@@ -353,11 +361,14 @@ def build_permission_arrays(
         # --- directional override (neutral) ---
         if cfg.directional_only and not np.isnan(prev_slope) and not np.isnan(prev_ema_f):
             if prev_close > prev_ema_f and prev_slope > 0:
-                allow_long[i] = 1; allow_short[i] = 0
+                allow_long[i] = 1
+                allow_short[i] = 0
             elif prev_close < prev_ema_f and prev_slope < 0:
-                allow_long[i] = 0; allow_short[i] = 1
+                allow_long[i] = 0
+                allow_short[i] = 1
             else:
-                allow_long[i] = 0; allow_short[i] = 0
+                allow_long[i] = 0
+                allow_short[i] = 0
 
         # --- short-if-bearish ---
         if cfg.short_if_below_ema and not cfg.directional_only:
@@ -374,10 +385,14 @@ def build_permission_arrays(
 
             if adx_ff_below > 0 and bar_adx < adx_ff_below:
                 # Tier 1: force_flat — close everything
-                allow_long[i] = 0; allow_short[i] = 0; force_flat[i] = 1
+                allow_long[i] = 0
+                allow_short[i] = 0
+                force_flat[i] = 1
             elif adx_entry_min > 0 and bar_adx < adx_entry_min:
                 # Tier 2: exit_only — no new entries, but existing can hold/close
-                allow_long[i] = 0; allow_short[i] = 0; exit_only[i] = 1
+                allow_long[i] = 0
+                allow_short[i] = 0
+                exit_only[i] = 1
 
     return allow_long, allow_short, force_flat, exit_only
 
@@ -533,10 +548,12 @@ def apply_permissions_with_position(
             else:
                 # in position — allow hold(1), allow close(0), block reversal
                 if raw == 0:
-                    out[i] = 0; position = 0
+                    out[i] = 0
+                    position = 0
                 elif (position == 1 and raw == 3) or (position == -1 and raw == 2):
                     # reversal attempt → close instead
-                    out[i] = 0; position = 0
+                    out[i] = 0
+                    position = 0
                 elif raw == 1:
                     pass  # hold, position unchanged
                 elif (position == 1 and raw == 2) or (position == -1 and raw == 3):
@@ -592,7 +609,9 @@ def apply_permission_arrays(
 
     for i in range(len(out)):
         if ff[i]:
-            out[i] = 0; pos = 0; continue
+            out[i] = 0
+            pos = 0
+            continue
 
         if eo[i]:
             if pos == 0:
@@ -601,17 +620,23 @@ def apply_permission_arrays(
             else:
                 raw = out[i]
                 if raw == 0:
-                    out[i] = 0; pos = 0
+                    out[i] = 0
+                    pos = 0
                 elif (pos == 1 and raw == 3) or (pos == -1 and raw == 2):
-                    out[i] = 0; pos = 0
+                    out[i] = 0
+                    pos = 0
                 elif raw in (1, 2, 3):
                     pass  # hold or same direction
             continue
 
         if pos == 1 and not al[i]:
-            out[i] = 0; pos = 0; continue
+            out[i] = 0
+            pos = 0
+            continue
         if pos == -1 and not as_[i]:
-            out[i] = 0; pos = 0; continue
+            out[i] = 0
+            pos = 0
+            continue
 
         raw = out[i]
         if raw == 2:

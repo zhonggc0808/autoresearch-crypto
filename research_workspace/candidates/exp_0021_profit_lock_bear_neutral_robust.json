@@ -1,0 +1,106 @@
+{
+  "experiment_id": "exp_0021_profit_lock_bear_neutral_robust",
+  "parent_id": "channel_breakout_v2_1_balanced",
+  "candidate_role": "standalone",
+  "strategy": "exit_logic_variant",
+  "description": "Robust BEAR+NEUTRAL profit-lock overlay for v2.1 ChannelBreakout: activate after 18% MFE, exit after 65% giveback or 5x ATR trail.",
+  "hypothesis": "A wider BEAR+NEUTRAL profit-lock can improve OOS return and Sharpe while avoiding the IS DD_OVER_50 gate triggered by tighter profit-lock variants.",
+  "expected_behavior_change": "BULL remains baseline-like. BEAR and NEUTRAL only exit after larger profitable excursions, preserving most trend tails while reducing severe profit giveback.",
+  "base": "v2.1_balanced",
+  "status": "research_only",
+  "constraints": [
+    "no_future_data",
+    "inherits_v21_risk",
+    "no_demo_routing",
+    "research_only"
+  ],
+  "params": {
+    "strategy_type": "exit_logic_channel_breakout",
+    "regime_change_policy": "permission_based",
+    "regime_filter": {
+      "fast_days": 50,
+      "slow_days": 200
+    },
+    "exit_logic": {
+      "exit_lookback": 0,
+      "take_profit_pct": 0.05,
+      "stop_loss_pct": 0.1,
+      "max_hold_bars": 720,
+      "trailing_stop": true,
+      "profit_lock": {
+        "enabled": false,
+        "activate_profit_pct": 0.2,
+        "giveback_ratio": 0.8,
+        "trailing_atr_multiplier": 0.0,
+        "atr_period": 14,
+        "min_hold_bars_before_lock": 0
+      },
+      "profit_lock_by_regime": {
+        "bear": {
+          "enabled": true,
+          "activate_profit_pct": 0.18,
+          "giveback_ratio": 0.65,
+          "trailing_atr_multiplier": 5.0,
+          "atr_period": 14,
+          "min_hold_bars_before_lock": 72
+        },
+        "neutral": {
+          "enabled": true,
+          "activate_profit_pct": 0.18,
+          "giveback_ratio": 0.65,
+          "trailing_atr_multiplier": 5.0,
+          "atr_period": 14,
+          "min_hold_bars_before_lock": 72
+        }
+      }
+    },
+    "bull": {
+      "candidate": "U4_cons3",
+      "description": "375/432 long-only; daily close below EMA50 for 3 completed days disables/closes long",
+      "strategy_params": {
+        "entry_lookback": 375,
+        "min_hold_bars": 432,
+        "enable_long": true,
+        "enable_short": false
+      },
+      "permission": {
+        "allow_long": true,
+        "allow_short": false,
+        "close_below_ema_disables_long": true,
+        "ema_fast": 50,
+        "consecutive_below_ema_days": 3
+      }
+    },
+    "bear": {
+      "candidate": "K0_base_PL_robust",
+      "description": "375/432 dual with robust BEAR profit-lock overlay; no additional filtering",
+      "strategy_params": {
+        "entry_lookback": 375,
+        "min_hold_bars": 432,
+        "enable_long": true,
+        "enable_short": true
+      },
+      "permission": {
+        "allow_long": true,
+        "allow_short": true
+      }
+    },
+    "neutral": {
+      "candidate": "N3_dir_PL_robust",
+      "description": "375/432 directional with robust NEUTRAL profit-lock overlay; long/short only when close and EMA50 slope agree",
+      "strategy_params": {
+        "entry_lookback": 375,
+        "min_hold_bars": 432,
+        "enable_long": true,
+        "enable_short": true
+      },
+      "permission": {
+        "allow_long": true,
+        "allow_short": true,
+        "directional_only": true,
+        "ema_fast": 50,
+        "ema_slope_days": 5
+      }
+    }
+  }
+}

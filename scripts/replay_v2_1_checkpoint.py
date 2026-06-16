@@ -13,15 +13,17 @@ import argparse
 import sys
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
 import torch
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
-from dex.config import COMMISSION, INITIAL_CAPITAL, SLIPPAGE
+from dex.checkpoints import (
+    apply_exit_logic_to_strategy_params,
+    build_channel_breakout_strategy_from_checkpoint,
+)
+from dex.config import COMMISSION, SLIPPAGE
 from dex.data import list_crypto_files, load_crypto_data
 from dex.indicators import compute_adx
 from dex.regime_filter import build_daily_regime_labels
@@ -33,12 +35,7 @@ from dex.regime_permissions import (
     route_regime_signals,
 )
 from dex.strategies.base import StrategyEvaluator
-from dex.strategies.channel_breakout import ChannelBreakoutTrendStrategy
 from dex.strategy_signals import generate_strategy_signals
-
-
-def _build_strategy(params: dict) -> ChannelBreakoutTrendStrategy:
-    return ChannelBreakoutTrendStrategy(**params)
 
 
 def run(checkpoint_path: str) -> None:
@@ -70,9 +67,15 @@ def run(checkpoint_path: str) -> None:
     print(f"IS: {split} bars | OOS: {len(df_oos)} bars")
 
     # 3. build strategies from checkpoint
-    bull_params = ckpt["bull"]["strategy_params"]
-    bear_params = ckpt["bear"]["strategy_params"]
-    neutral_params = ckpt["neutral"]["strategy_params"]
+    bull_params = apply_exit_logic_to_strategy_params(
+        ckpt["bull"]["strategy_params"], ckpt.get("exit_logic")
+    )
+    bear_params = apply_exit_logic_to_strategy_params(
+        ckpt["bear"]["strategy_params"], ckpt.get("exit_logic")
+    )
+    neutral_params = apply_exit_logic_to_strategy_params(
+        ckpt["neutral"]["strategy_params"], ckpt.get("exit_logic")
+    )
 
     bull_cfg = RiskOffConfig(**ckpt["bull"]["permission"])
     bear_cfg = RiskOffConfig(**ckpt["bear"]["permission"])
@@ -86,9 +89,9 @@ def run(checkpoint_path: str) -> None:
     print(f"Policy: {policy}")
 
     # 4. generate per-regime signals
-    bull_s = _build_strategy(bull_params)
-    bear_s = _build_strategy(bear_params)
-    neutral_s = _build_strategy(neutral_params)
+    bull_s = build_channel_breakout_strategy_from_checkpoint(ckpt, "bull")
+    bear_s = build_channel_breakout_strategy_from_checkpoint(ckpt, "bear")
+    neutral_s = build_channel_breakout_strategy_from_checkpoint(ckpt, "neutral")
 
     bull_raw = generate_strategy_signals(bull_s, df, enable_short=bull_params.get("enable_short", True))
     bear_raw = generate_strategy_signals(bear_s, df, enable_short=bear_params.get("enable_short", True))
@@ -128,7 +131,7 @@ def run(checkpoint_path: str) -> None:
     tpy = trades / years_est if years_est > 0 else 0
 
     print(f"\n{'='*60}")
-    print(f"  REPLAY RESULT")
+    print("  REPLAY RESULT")
     print(f"{'='*60}")
     print(f"  OOS Return:     {ret:+.2f}%")
     print(f"  OOS Max DD:     {dd:.2f}%")
@@ -142,7 +145,7 @@ def run(checkpoint_path: str) -> None:
     # 8. compare with expected
     if expected_metrics:
         print(f"\n{'='*60}")
-        print(f"  DELTA vs EXPECTED")
+        print("  DELTA vs EXPECTED")
         print(f"{'='*60}")
         exp_ret = expected_metrics["oos_return_pct"]
         exp_dd = expected_metrics["oos_max_drawdown_pct"]
@@ -161,10 +164,10 @@ def run(checkpoint_path: str) -> None:
 
         all_ok = (abs(ret_delta) < 2 and abs(dd_delta) < 2 and abs(trades_delta) < 10)
         if all_ok:
-            print(f"\n  PASS — metrics consistent with search results")
+            print("\n  PASS — metrics consistent with search results")
         else:
-            print(f"\n  FAIL — significant deviation from expected metrics")
-            print(f"     Check: data split, regime labels, permission routing")
+            print("\n  FAIL — significant deviation from expected metrics")
+            print("     Check: data split, regime labels, permission routing")
 
 
 if __name__ == "__main__":

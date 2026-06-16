@@ -48,8 +48,10 @@ from okx.PublicData import PublicAPI
 from okx.Trade import TradeAPI
 
 from dex.checkpoints import (
+    build_channel_breakout_strategy_from_checkpoint,
     build_strategy_from_checkpoint,
     describe_strategy,
+    is_regime_channel_breakout_checkpoint,
     load_checkpoint,
 )
 from dex.data import list_crypto_files, load_crypto_data
@@ -70,7 +72,6 @@ from dex.regime_permissions import (
     compute_daily_indicators,
     route_regime_signals,
 )
-from dex.strategies.channel_breakout import ChannelBreakoutTrendStrategy
 from dex.strategy_signals import generate_strategy_signals
 
 LOG_DIR = "logs"
@@ -1517,15 +1518,15 @@ def main():
     checkpoint = load_checkpoint(args.checkpoint)
 
     # ---- detect v2.1 regime_permission checkpoint --------------------------
-    is_v21 = checkpoint.get("strategy_type") == "regime_permission_channel_breakout"
+    is_v21 = is_regime_channel_breakout_checkpoint(checkpoint)
 
     if is_v21:
-        log_message("检测到 v2.1 regime_permission checkpoint")
+        log_message(f"检测到 v2.1-compatible checkpoint: {checkpoint.get('strategy_type')}")
         log_message(f"  variant: {checkpoint.get('variant', '?')}")
         log_message(f"  status: {checkpoint.get('status', '?')}")
-        v21_bull_s = ChannelBreakoutTrendStrategy(**checkpoint["bull"]["strategy_params"])
-        v21_bear_s = ChannelBreakoutTrendStrategy(**checkpoint["bear"]["strategy_params"])
-        v21_neutral_s = ChannelBreakoutTrendStrategy(**checkpoint["neutral"]["strategy_params"])
+        v21_bull_s = build_channel_breakout_strategy_from_checkpoint(checkpoint, "bull")
+        v21_bear_s = build_channel_breakout_strategy_from_checkpoint(checkpoint, "bear")
+        v21_neutral_s = build_channel_breakout_strategy_from_checkpoint(checkpoint, "neutral")
         v21_bull_cfg = RiskOffConfig(**checkpoint["bull"]["permission"])
         v21_bear_cfg = RiskOffConfig(**checkpoint["bear"]["permission"])
         v21_neutral_cfg = RiskOffConfig(**checkpoint["neutral"]["permission"])
@@ -1533,7 +1534,7 @@ def main():
         v21_regime_fast = checkpoint.get("regime_filter", {}).get("fast_days", 50)
         v21_regime_slow = checkpoint.get("regime_filter", {}).get("slow_days", 200)
         strategy = None
-        strategy_type = "regime_permission_channel_breakout"
+        strategy_type = checkpoint.get("strategy_type", "regime_permission_channel_breakout")
         log_message(f"BULL:  {checkpoint['bull']['candidate']}")
         log_message(f"BEAR:  {checkpoint['bear']['candidate']}")
         log_message(f"NEUTRAL: {checkpoint['neutral']['candidate']}")

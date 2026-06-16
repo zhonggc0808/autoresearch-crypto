@@ -1,0 +1,70 @@
+{
+  "timestamp": "2026-06-16T08:39:07Z",
+  "experiment_id": "exp_9994",
+  "reason": "Forbidden content detected (References a checkpoint (bare word))",
+  "proposal": {
+    "candidate_role": "standalone",
+    "base": "v2.1_balanced",
+    "status": "research_only",
+    "constraints": [
+      "no_future_data",
+      "inherits_v21_risk",
+      "no_demo_routing",
+      "research_only"
+    ],
+    "experiment_id": "exp_9994",
+    "strategy": "channel_breakout",
+    "parent_id": "channel_breakout_v2_1_balanced",
+    "description": "Hypothesis with checkpoint reference",
+    "hypothesis": "Checkpoint path injection test. Checkpoint path injection test. Checkpoint path injection test. Checkpoint path injection test. Checkpoint path injection test. ",
+    "expected_behavior_change": "Should be rejected. Should be rejected. Should be rejected. Should be rejected. Should be rejected. ",
+    "params": {
+      "strategy_type": "regime_permission_channel_breakout",
+      "regime_change_policy": "permission_based",
+      "regime_filter": {
+        "fast_days": 50,
+        "slow_days": 200
+      },
+      "bull": {
+        "candidate": "test",
+        "strategy_params": {
+          "entry_lookback": 375,
+          "min_hold_bars": 432,
+          "enable_long": true,
+          "enable_short": false
+        },
+        "permission": {
+          "allow_long": true,
+          "allow_short": false
+        }
+      },
+      "bear": {
+        "candidate": "test",
+        "strategy_params": {
+          "entry_lookback": 375,
+          "min_hold_bars": 432,
+          "enable_long": true,
+          "enable_short": true
+        },
+        "permission": {
+          "allow_long": true,
+          "allow_short": true
+        }
+      },
+      "neutral": {
+        "candidate": "test",
+        "strategy_params": {
+          "entry_lookback": 375,
+          "min_hold_bars": 432,
+          "enable_long": true,
+          "enable_short": true
+        },
+        "permission": {
+          "allow_long": true,
+          "allow_short": true
+        }
+      }
+    }
+  },
+  "llm_response_raw": "{\"parent_id\": \"channel_breakout_v2_1_balanced\", \"description\": \"Hypothesis with checkpoint reference\", \"hypothesis\": \"Checkpoint path injection test. Checkpoint path injection test. Checkpoint path injection test. Checkpoint path injection test. Checkpoint path injection test. \", \"expected_behavior_change\": \"Should be rejected. Should be rejected. Should be rejected. Should be rejected. Should be rejected. \", \"params\": {\"strategy_type\": \"regime_permission_channel_breakout\", \"regime_change_policy\": \"permission_based\", \"regime_filter\": {\"fast_days\": 50, \"slow_days\": 200}, \"bull\": {\"candidate\": \"test\", \"strategy_params\": {\"entry_lookback\": 375, \"min_hold_bars\": 432, \"enable_long\": true, \"enable_short\": false}, \"permission\": {\"allow_long\": true, \"allow_short\": false}}, \"bear\": {\"candidate\": \"test\", \"strategy_params\": {\"entry_lookback\": 375, \"min_hold_bars\": 432, \"enable_long\": true, \"enable_short\": true}, \"permission\": {\"allow_long\": true, \"allow_short\": true}}, \"neutral\": {\"candidate\": \"test\", \"strategy_params\": {\"entry_lookback\": 375, \"min_hold_bars\": 432, \"enable_long\": true, \"enable_short\": true}, \"permission\": {\"allow_long\": true, \"allow_short\": true}}}}"
+}

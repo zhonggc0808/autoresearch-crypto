@@ -42,6 +42,12 @@ class ChannelBreakoutTrendStrategy(BaseStrategy):
         take_profit_pct: float = 0.0,
         stop_loss_pct: float = 0.0,
         max_hold_bars: int = 0,
+        profit_lock_enabled: bool = False,
+        profit_lock_activate_pct: float = 0.0,
+        profit_lock_giveback_ratio: float = 1.0,
+        profit_lock_atr_multiplier: float = 0.0,
+        profit_lock_atr_period: int = 14,
+        profit_lock_min_hold_bars: int = 0,
     ) -> None:
         if enable_short_alias is not None:
             enable_short = enable_short_alias
@@ -65,8 +71,19 @@ class ChannelBreakoutTrendStrategy(BaseStrategy):
         self.take_profit_pct = take_profit_pct
         self.stop_loss_pct = stop_loss_pct
         self.max_hold_bars = max_hold_bars
+        self.profit_lock_enabled = profit_lock_enabled
+        self.profit_lock_activate_pct = profit_lock_activate_pct
+        self.profit_lock_giveback_ratio = profit_lock_giveback_ratio
+        self.profit_lock_atr_multiplier = profit_lock_atr_multiplier
+        self.profit_lock_atr_period = profit_lock_atr_period
+        self.profit_lock_min_hold_bars = profit_lock_min_hold_bars
 
         atr_window = atr_period if breakout_atr_buffer > 0 else 0
+        profit_lock_atr_window = (
+            profit_lock_atr_period
+            if profit_lock_enabled and profit_lock_atr_multiplier > 0
+            else 0
+        )
         adx_window = adx_period * 2 if adx_threshold > 0 or require_di_alignment else 0
         self.window = max(
             entry_lookback,
@@ -74,6 +91,7 @@ class ChannelBreakoutTrendStrategy(BaseStrategy):
             trend_ma_period,
             trend_slope_lookback,
             atr_window,
+            profit_lock_atr_window,
             adx_window,
         )
         self.warmup_bars = self.window
@@ -113,6 +131,10 @@ class ChannelBreakoutTrendStrategy(BaseStrategy):
         if self.breakout_atr_buffer > 0:
             atr = compute_atr(df, self.atr_period)
 
+        profit_lock_atr = None
+        if self.profit_lock_enabled and self.profit_lock_atr_multiplier > 0:
+            profit_lock_atr = compute_atr(df, self.profit_lock_atr_period)
+
         trend_ma = None
         if self.trend_ma_period > 0:
             trend_ma = compute_ema(close, self.trend_ma_period)
@@ -124,6 +146,10 @@ class ChannelBreakoutTrendStrategy(BaseStrategy):
         position = 0
         entry_bar = 0
         entry_price = 0.0
+        highest_after_entry = 0.0
+        lowest_after_entry = float("inf")
+        mfe_pct = 0.0
+        profit_lock_active = False
         last_exit_bar = -self.cooldown_bars
         allow_short = self.enable_short and enable_short
 
@@ -175,11 +201,39 @@ class ChannelBreakoutTrendStrategy(BaseStrategy):
             )
 
             if position == 1:
+                highest_after_entry = max(highest_after_entry, high[i])
+                unrealized_profit = price / entry_price - 1.0 if entry_price > 0 else 0.0
+                mfe_pct = max(mfe_pct, highest_after_entry / entry_price - 1.0)
+                bars_held = i - entry_bar
+                if (
+                    self.profit_lock_enabled
+                    and bars_held >= self.profit_lock_min_hold_bars
+                    and mfe_pct >= self.profit_lock_activate_pct
+                ):
+                    profit_lock_active = True
+
                 stop_hit = self.emergency_stop_pct > 0 and price <= entry_price * (
                     1.0 - self.emergency_stop_pct
                 )
+                giveback_exit = (
+                    profit_lock_active
+                    and unrealized_profit
+                    <= mfe_pct * (1.0 - self.profit_lock_giveback_ratio)
+                )
+                atr_exit = (
+                    profit_lock_active
+                    and profit_lock_atr is not None
+                    and price
+                    <= highest_after_entry
+                    - self.profit_lock_atr_multiplier * profit_lock_atr[i]
+                )
                 exit_hit = exit_low is not None and price < exit_low[i]
                 if stop_hit:
+                    signals[i] = 0
+                    position = 0
+                    last_exit_bar = i
+                    continue
+                if giveback_exit or atr_exit:
                     signals[i] = 0
                     position = 0
                     last_exit_bar = i
@@ -194,16 +248,48 @@ class ChannelBreakoutTrendStrategy(BaseStrategy):
                     position = -1
                     entry_bar = i
                     entry_price = price
+                    highest_after_entry = high[i]
+                    lowest_after_entry = low[i]
+                    mfe_pct = 0.0
+                    profit_lock_active = False
                     continue
                 signals[i] = 2
                 continue
 
             if position == -1:
+                lowest_after_entry = min(lowest_after_entry, low[i])
+                unrealized_profit = entry_price / price - 1.0 if price > 0 else 0.0
+                mfe_pct = max(mfe_pct, entry_price / lowest_after_entry - 1.0)
+                bars_held = i - entry_bar
+                if (
+                    self.profit_lock_enabled
+                    and bars_held >= self.profit_lock_min_hold_bars
+                    and mfe_pct >= self.profit_lock_activate_pct
+                ):
+                    profit_lock_active = True
+
                 stop_hit = self.emergency_stop_pct > 0 and price >= entry_price * (
                     1.0 + self.emergency_stop_pct
                 )
+                giveback_exit = (
+                    profit_lock_active
+                    and unrealized_profit
+                    <= mfe_pct * (1.0 - self.profit_lock_giveback_ratio)
+                )
+                atr_exit = (
+                    profit_lock_active
+                    and profit_lock_atr is not None
+                    and price
+                    >= lowest_after_entry
+                    + self.profit_lock_atr_multiplier * profit_lock_atr[i]
+                )
                 exit_hit = exit_high is not None and price > exit_high[i]
                 if stop_hit:
+                    signals[i] = 0
+                    position = 0
+                    last_exit_bar = i
+                    continue
+                if giveback_exit or atr_exit:
                     signals[i] = 0
                     position = 0
                     last_exit_bar = i
@@ -218,6 +304,10 @@ class ChannelBreakoutTrendStrategy(BaseStrategy):
                     position = 1
                     entry_bar = i
                     entry_price = price
+                    highest_after_entry = high[i]
+                    lowest_after_entry = low[i]
+                    mfe_pct = 0.0
+                    profit_lock_active = False
                     continue
                 signals[i] = 3
                 continue
@@ -229,10 +319,18 @@ class ChannelBreakoutTrendStrategy(BaseStrategy):
                 position = 1
                 entry_bar = i
                 entry_price = price
+                highest_after_entry = high[i]
+                lowest_after_entry = low[i]
+                mfe_pct = 0.0
+                profit_lock_active = False
             elif short_break:
                 signals[i] = 3
                 position = -1
                 entry_bar = i
                 entry_price = price
+                highest_after_entry = high[i]
+                lowest_after_entry = low[i]
+                mfe_pct = 0.0
+                profit_lock_active = False
 
         return signals

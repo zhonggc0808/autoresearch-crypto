@@ -1,0 +1,7 @@
+{
+  "codegen_id": "tmpqb_mps7c",
+  "timestamp": "2026-06-16T08:39:02Z",
+  "error_reason": "evaluation_failed",
+  "details": "generate_signals failed: division by zero",
+  "strategy_name": "ema_cross_test"
+}

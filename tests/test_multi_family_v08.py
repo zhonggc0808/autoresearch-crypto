@@ -20,7 +20,6 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -116,6 +115,58 @@ VALID_EXIT_LOGIC_VARIANT = {
     },
 }
 
+VALID_EXIT_LOGIC_WITH_PROFIT_LOCK = copy.deepcopy(VALID_EXIT_LOGIC_VARIANT)
+VALID_EXIT_LOGIC_WITH_PROFIT_LOCK["experiment_id"] = "exp_9996"
+VALID_EXIT_LOGIC_WITH_PROFIT_LOCK["params"]["exit_logic"]["profit_lock"] = {
+    "enabled": True,
+    "activate_profit_pct": 0.08,
+    "giveback_ratio": 0.35,
+    "trailing_atr_multiplier": 3.0,
+    "atr_period": 14,
+    "min_hold_bars_before_lock": 72,
+}
+
+VALID_EXIT_LOGIC_WITH_DISABLED_EXIT_LOOKBACK = copy.deepcopy(VALID_EXIT_LOGIC_WITH_PROFIT_LOCK)
+VALID_EXIT_LOGIC_WITH_DISABLED_EXIT_LOOKBACK["experiment_id"] = "exp_9995"
+VALID_EXIT_LOGIC_WITH_DISABLED_EXIT_LOOKBACK["params"]["exit_logic"]["exit_lookback"] = 0
+
+VALID_EXIT_LOGIC_WITH_REGIME_PROFIT_LOCK = copy.deepcopy(VALID_EXIT_LOGIC_VARIANT)
+VALID_EXIT_LOGIC_WITH_REGIME_PROFIT_LOCK["experiment_id"] = "exp_9994"
+VALID_EXIT_LOGIC_WITH_REGIME_PROFIT_LOCK["params"]["exit_logic"]["profit_lock"] = {
+    "enabled": False,
+    "activate_profit_pct": 0.20,
+    "giveback_ratio": 0.80,
+    "trailing_atr_multiplier": 0.0,
+    "atr_period": 14,
+    "min_hold_bars_before_lock": 0,
+}
+VALID_EXIT_LOGIC_WITH_REGIME_PROFIT_LOCK["params"]["exit_logic"]["profit_lock_by_regime"] = {
+    "bear": {
+        "enabled": True,
+        "activate_profit_pct": 0.08,
+        "giveback_ratio": 0.35,
+        "trailing_atr_multiplier": 3.0,
+        "atr_period": 14,
+        "min_hold_bars_before_lock": 72,
+    }
+}
+
+VALID_EXIT_LOGIC_WITH_MATURE_GUARDS = copy.deepcopy(VALID_EXIT_LOGIC_VARIANT)
+VALID_EXIT_LOGIC_WITH_MATURE_GUARDS["experiment_id"] = "exp_9993"
+VALID_EXIT_LOGIC_WITH_MATURE_GUARDS["params"]["exit_logic"]["mature_trend_exit"] = {
+    "enabled": True,
+    "activate_mfe_pct": 1.20,
+    "daily_ema_period": 20,
+    "use_completed_daily_bar": True,
+    "min_hold_bars_before_exit": 0,
+}
+VALID_EXIT_LOGIC_WITH_MATURE_GUARDS["params"]["exit_logic"]["bear_cooldown"] = {
+    "enabled": True,
+    "loss_streak": 2,
+    "cooldown_bars": 864,
+    "scope": "bear_entry_trades",
+}
+
 INVALID_UNREGISTERED_FAMILY = copy.deepcopy(VALID_CHANNEL_BREAKOUT)
 INVALID_UNREGISTERED_FAMILY["strategy"] = "lstm_strategy"
 
@@ -139,6 +190,16 @@ INVALID_EXIT_LOGIC_SL_OUT["params"]["exit_logic"]["stop_loss_pct"] = 0.35  # abo
 INVALID_EXIT_LOGIC_LOOKBACK_OUT = copy.deepcopy(VALID_EXIT_LOGIC_VARIANT)
 INVALID_EXIT_LOGIC_LOOKBACK_OUT["params"]["exit_logic"]["exit_lookback"] = 5  # below min 12
 
+INVALID_EXIT_LOGIC_PROFIT_LOCK_GIVEBACK_OUT = copy.deepcopy(VALID_EXIT_LOGIC_WITH_PROFIT_LOCK)
+INVALID_EXIT_LOGIC_PROFIT_LOCK_GIVEBACK_OUT["params"]["exit_logic"]["profit_lock"][
+    "giveback_ratio"
+] = 1.5
+
+INVALID_EXIT_LOGIC_MATURE_USES_LIVE_DAILY = copy.deepcopy(VALID_EXIT_LOGIC_WITH_MATURE_GUARDS)
+INVALID_EXIT_LOGIC_MATURE_USES_LIVE_DAILY["params"]["exit_logic"]["mature_trend_exit"][
+    "use_completed_daily_bar"
+] = False
+
 
 # ===================================================================
 # Test: Family registry
@@ -149,7 +210,8 @@ class TestFamilyRegistry:
     """Verify the family registry returns correct definitions."""
 
     def test_registered_families(self):
-        from scripts.family_registry import list_families, get, is_valid
+        from scripts.family_registry import is_valid, list_families
+
         assert is_valid("channel_breakout")
         assert is_valid("volatility_filtered_breakout")
         assert not is_valid("unknown_family")
@@ -381,7 +443,8 @@ class TestExitLogicVariant:
     """Verify exit_logic_variant family is properly registered and validated."""
 
     def test_registered(self):
-        from scripts.family_registry import is_valid, get
+        from scripts.family_registry import get, is_valid
+
         assert is_valid("exit_logic_variant")
         fd = get("exit_logic_variant")
         assert fd is not None
@@ -392,6 +455,35 @@ class TestExitLogicVariant:
         from scripts.validate_candidate_v08 import validate_candidate
         errors = validate_candidate(VALID_EXIT_LOGIC_VARIANT, check_uniqueness=False)
         assert errors == [], f"Exit logic variant failed: {errors}"
+
+    def test_valid_profit_lock_candidate_passes(self):
+        from scripts.validate_candidate_v08 import validate_candidate
+        errors = validate_candidate(VALID_EXIT_LOGIC_WITH_PROFIT_LOCK, check_uniqueness=False)
+        assert errors == [], f"Exit logic profit-lock variant failed: {errors}"
+
+    def test_exit_lookback_zero_disables_channel_exit_and_passes(self):
+        from scripts.validate_candidate_v08 import validate_candidate
+        errors = validate_candidate(
+            VALID_EXIT_LOGIC_WITH_DISABLED_EXIT_LOOKBACK,
+            check_uniqueness=False,
+        )
+        assert errors == [], f"exit_lookback=0 should disable channel exit: {errors}"
+
+    def test_regime_specific_profit_lock_candidate_passes(self):
+        from scripts.validate_candidate_v08 import validate_candidate
+        errors = validate_candidate(
+            VALID_EXIT_LOGIC_WITH_REGIME_PROFIT_LOCK,
+            check_uniqueness=False,
+        )
+        assert errors == [], f"regime-specific profit-lock variant failed: {errors}"
+
+    def test_mature_guard_candidate_passes(self):
+        from scripts.validate_candidate_v08 import validate_candidate
+        errors = validate_candidate(
+            VALID_EXIT_LOGIC_WITH_MATURE_GUARDS,
+            check_uniqueness=False,
+        )
+        assert errors == [], f"mature trend guard variant failed: {errors}"
 
     def test_missing_exit_logic_rejected(self):
         from scripts.validate_candidate_v08 import validate_candidate
@@ -413,6 +505,22 @@ class TestExitLogicVariant:
         errors = validate_candidate(INVALID_EXIT_LOGIC_LOOKBACK_OUT, check_uniqueness=False)
         assert errors, "Expected error for exit_lookback < 12"
 
+    def test_profit_lock_giveback_out_of_bounds_rejected(self):
+        from scripts.validate_candidate_v08 import validate_candidate
+        errors = validate_candidate(
+            INVALID_EXIT_LOGIC_PROFIT_LOCK_GIVEBACK_OUT,
+            check_uniqueness=False,
+        )
+        assert errors, "Expected error for profit_lock.giveback_ratio > 1.0"
+
+    def test_mature_guard_rejects_non_completed_daily_bar(self):
+        from scripts.validate_candidate_v08 import validate_candidate
+        errors = validate_candidate(
+            INVALID_EXIT_LOGIC_MATURE_USES_LIVE_DAILY,
+            check_uniqueness=False,
+        )
+        assert errors, "Expected error for use_completed_daily_bar=false"
+
     def test_allowed_change_exit_logic(self):
         from scripts.family_registry import validate_allowed_change
         errors = validate_allowed_change(
@@ -420,6 +528,80 @@ class TestExitLogicVariant:
             {"exit_logic": {"take_profit_pct": 0.08, "stop_loss_pct": 0.12, "trailing_stop": False}},
         )
         assert errors == [], f"Expected no errors: {errors}"
+
+    def test_allowed_change_profit_lock(self):
+        from scripts.family_registry import validate_allowed_change
+        errors = validate_allowed_change(
+            "exit_logic_variant",
+            {
+                "exit_logic": {
+                    "profit_lock": {
+                        "enabled": True,
+                        "activate_profit_pct": 0.08,
+                        "giveback_ratio": 0.35,
+                    }
+                }
+            },
+        )
+        assert errors == [], f"Expected no errors: {errors}"
+
+    def test_allowed_change_regime_specific_profit_lock(self):
+        from scripts.family_registry import validate_allowed_change
+        errors = validate_allowed_change(
+            "exit_logic_variant",
+            {
+                "exit_logic": {
+                    "profit_lock_by_regime": {
+                        "bear": {
+                            "enabled": True,
+                            "activate_profit_pct": 0.18,
+                            "giveback_ratio": 0.65,
+                            "trailing_atr_multiplier": 5.0,
+                        }
+                    }
+                }
+            },
+        )
+        assert errors == [], f"Expected no errors: {errors}"
+
+    def test_allowed_change_mature_guard_and_bear_cooldown(self):
+        from scripts.family_registry import validate_allowed_change
+        errors = validate_allowed_change(
+            "exit_logic_variant",
+            {
+                "exit_logic": {
+                    "mature_trend_exit": {
+                        "enabled": True,
+                        "activate_mfe_pct": 1.20,
+                        "daily_ema_period": 20,
+                        "use_completed_daily_bar": True,
+                    },
+                    "bear_cooldown": {
+                        "enabled": True,
+                        "loss_streak": 2,
+                        "cooldown_bars": 864,
+                    },
+                }
+            },
+        )
+        assert errors == [], f"Expected no errors: {errors}"
+
+    def test_allowed_change_regime_specific_profit_lock_rejects_unknown_regime(self):
+        from scripts.family_registry import validate_allowed_change
+        errors = validate_allowed_change(
+            "exit_logic_variant",
+            {
+                "exit_logic": {
+                    "profit_lock_by_regime": {
+                        "sideways": {
+                            "enabled": True,
+                            "activate_profit_pct": 0.18,
+                        }
+                    }
+                }
+            },
+        )
+        assert errors, "Expected error for unknown profit_lock_by_regime key"
 
     def test_exit_allowed_change_out_of_bounds(self):
         from scripts.family_registry import validate_allowed_change

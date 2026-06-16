@@ -27,11 +27,40 @@
       "additionalProperties": false,
       "required": ["exit_lookback", "take_profit_pct", "stop_loss_pct", "max_hold_bars", "trailing_stop"],
       "properties": {
-        "exit_lookback":  { "type": "integer", "minimum": 12, "maximum": 1440, "description": "Lookback bars for exit signal generation" },
+        "exit_lookback": {
+          "type": "integer",
+          "oneOf": [
+            { "const": 0 },
+            { "minimum": 12, "maximum": 1440 }
+          ],
+          "description": "Lookback bars for exit signal generation; 0 disables channel-exit overlay"
+        },
         "take_profit_pct": { "type": "number", "minimum": 0.01, "maximum": 0.50, "description": "Take-profit threshold (1% to 50%)" },
         "stop_loss_pct":  { "type": "number", "minimum": 0.01, "maximum": 0.30, "description": "Stop-loss threshold (1% to 30%)" },
         "max_hold_bars":  { "type": "integer", "minimum": 12, "maximum": 2880, "description": "Maximum bars to hold a position before forced exit" },
-        "trailing_stop":  { "type": "boolean", "description": "Whether stop-loss is trailing (adjusts upward in profit)" }
+        "trailing_stop":  { "type": "boolean", "description": "Whether stop-loss is trailing (adjusts upward in profit)" },
+        "profit_lock": {
+          "$ref": "#/definitions/profit_lock_config",
+          "description": "Optional profit-lock overlay that activates after a minimum floating profit and exits on giveback or ATR trailing reversal."
+        },
+        "profit_lock_by_regime": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Optional per-regime profit-lock overrides. Missing regimes use the global profit_lock settings.",
+          "properties": {
+            "bull": { "$ref": "#/definitions/profit_lock_config" },
+            "bear": { "$ref": "#/definitions/profit_lock_config" },
+            "neutral": { "$ref": "#/definitions/profit_lock_config" }
+          }
+        },
+        "mature_trend_exit": {
+          "$ref": "#/definitions/mature_trend_exit_config",
+          "description": "Optional post-routing mature trend guard. Activates after large MFE and exits when the 5m close breaks a previous completed daily EMA."
+        },
+        "bear_cooldown": {
+          "$ref": "#/definitions/bear_cooldown_config",
+          "description": "Optional post-routing BEAR-only cooldown. Blocks new BEAR entries after realized BEAR-entry losses."
+        }
       }
     },
     "bull":    { "$ref": "#/definitions/regime_config" },
@@ -39,6 +68,42 @@
     "neutral": { "$ref": "#/definitions/regime_config" }
   },
   "definitions": {
+    "profit_lock_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "activate_profit_pct": { "type": "number", "minimum": 0.0, "maximum": 0.50 },
+        "giveback_ratio": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "trailing_atr_multiplier": { "type": "number", "minimum": 0.0, "maximum": 10.0 },
+        "atr_period": { "type": "integer", "minimum": 2, "maximum": 100 },
+        "min_hold_bars_before_lock": { "type": "integer", "minimum": 0, "maximum": 2880 }
+      }
+    },
+    "mature_trend_exit_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "activate_mfe_pct", "daily_ema_period", "use_completed_daily_bar"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "activate_mfe_pct": { "type": "number", "minimum": 0.0, "maximum": 5.0 },
+        "daily_ema_period": { "type": "integer", "minimum": 2, "maximum": 200 },
+        "use_completed_daily_bar": { "const": true },
+        "min_hold_bars_before_exit": { "type": "integer", "minimum": 0, "maximum": 2880 }
+      }
+    },
+    "bear_cooldown_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "loss_streak"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "loss_streak": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "cooldown_bars": { "type": "integer", "minimum": 1, "maximum": 2880 },
+        "cooldown_days": { "type": "integer", "minimum": 1, "maximum": 30 },
+        "scope": { "type": "string", "enum": ["bear_entry_trades"] }
+      }
+    },
     "strategy_params": {
       "type": "object",
       "additionalProperties": false,

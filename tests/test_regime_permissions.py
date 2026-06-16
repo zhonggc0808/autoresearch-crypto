@@ -18,7 +18,6 @@ from dex.regime_permissions import (
     route_regime_signals,
 )
 
-
 # ── fixtures ─────────────────────────────────────────────────────────────────
 
 
@@ -367,6 +366,67 @@ def test_compute_daily_indicators_structure():
     assert 28 <= len(ctx["close"]) <= 31
 
 
+def _daily_constant_ohlcv(daily_closes: list[float]) -> pd.DataFrame:
+    rows = []
+    dts = pd.date_range("2026-01-01", periods=len(daily_closes) * 288, freq="5min")
+    for close in daily_closes:
+        rows.extend([float(close)] * 288)
+    close_arr = np.asarray(rows, dtype=float)
+    return pd.DataFrame(
+        {
+            "datetime": dts,
+            "timestamp": dts.astype(np.int64) // 10**9,
+            "open": close_arr,
+            "high": close_arr,
+            "low": close_arr,
+            "close": close_arr,
+            "volume": np.full(len(close_arr), 1000.0),
+        }
+    )
+
+
+def test_consecutive_below_ema_uses_previous_completed_day_without_extra_lag():
+    """Day D should use the streak completed through D-1, not D-2."""
+    daily_closes = [100.0] * 55 + [90.0, 90.0, 90.0, 90.0]
+    df = _daily_constant_ohlcv(daily_closes)
+    regimes = np.array(["BULL"] * len(df), dtype=object)
+    cfg = RiskOffConfig(
+        allow_long=True,
+        allow_short=False,
+        close_below_ema_disables_long=True,
+        ema_fast=50,
+        consecutive_below_ema_days=3,
+    )
+
+    daily_ctx = compute_daily_indicators(df)
+    al, _, _, _ = build_permission_arrays(df, regimes, cfg, cfg, cfg, daily_ctx)
+
+    day_59_start = 58 * 288
+    assert daily_ctx["consecutive_below"].iloc[58] >= 3
+    assert al[day_59_start] == 0
+
+
+def test_consecutive_below_ema_does_not_use_current_unfinished_day():
+    """Current day close must not count until the next completed day."""
+    daily_closes = [100.0] * 55 + [90.0, 90.0, 90.0]
+    df = _daily_constant_ohlcv(daily_closes)
+    regimes = np.array(["BULL"] * len(df), dtype=object)
+    cfg = RiskOffConfig(
+        allow_long=True,
+        allow_short=False,
+        close_below_ema_disables_long=True,
+        ema_fast=50,
+        consecutive_below_ema_days=3,
+    )
+
+    daily_ctx = compute_daily_indicators(df)
+    al, _, _, _ = build_permission_arrays(df, regimes, cfg, cfg, cfg, daily_ctx)
+
+    day_58_start = 57 * 288
+    assert daily_ctx["consecutive_below"].iloc[57] == 2
+    assert al[day_58_start] == 1
+
+
 # ── N7 preset integration test ───────────────────────────────────────────────
 
 def test_n7_preset_has_three_tier_adx():
@@ -495,7 +555,6 @@ class TestDDContribution:
         signals[150] = 0  # close
 
         regimes = np.array(["BULL"] * n, dtype=object)
-        dts = np.array([f"2026-01-{d:02d}" for d in range(1, n + 1)])
 
         ev = StrategyEvaluator(commission=0, slippage=0)
         equity, trade_log = ev.simulate(signals, prices)
