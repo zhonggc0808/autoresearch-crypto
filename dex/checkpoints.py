@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -81,8 +82,35 @@ PROFIT_LOCK_FIELD_MAP = {
 
 
 def load_checkpoint(path: str | Path) -> dict[str, Any]:
-    """Load a Torch checkpoint from disk."""
-    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    """Load a Torch or JSON checkpoint/profile from disk."""
+    checkpoint_path = Path(path)
+    if checkpoint_path.suffix.lower() == ".json":
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        if not isinstance(checkpoint, dict):
+            raise ValueError(
+                f"JSON checkpoint must contain a dict, got {type(checkpoint).__name__}"
+            )
+        if isinstance(checkpoint.get("params"), Mapping):
+            raw = checkpoint
+            checkpoint = dict(raw["params"])
+            for key in (
+                "experiment_id",
+                "parent_id",
+                "candidate_role",
+                "strategy",
+                "description",
+                "hypothesis",
+                "expected_behavior_change",
+                "base",
+                "status",
+                "version",
+                "variant",
+            ):
+                if key in raw and key not in checkpoint:
+                    checkpoint[key] = raw[key]
+        return checkpoint
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     if not isinstance(checkpoint, dict):
         raise ValueError(f"Checkpoint must contain a dict, got {type(checkpoint).__name__}")
     return checkpoint

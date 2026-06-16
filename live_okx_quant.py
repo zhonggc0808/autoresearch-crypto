@@ -55,7 +55,6 @@ from dex.checkpoints import (
     load_checkpoint,
 )
 from dex.data import list_crypto_files, load_crypto_data
-from dex.indicators import compute_adx
 from dex.live.common import (
     compute_order_price,
     plan_close_order,
@@ -64,15 +63,10 @@ from dex.live.common import (
     round_to_tick,
     send_trade_notification,
 )
-from dex.regime_filter import build_daily_regime_labels
+from dex.live.signals import generate_live_regime_channel_breakout_signal
 from dex.regime_permissions import (
     RiskOffConfig,
-    apply_permission_arrays,
-    build_permission_arrays,
-    compute_daily_indicators,
-    route_regime_signals,
 )
-from dex.strategy_signals import generate_strategy_signals
 
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -85,6 +79,7 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 OKX_STRATEGY_PROFILES = {
     "channel_breakout_v2": "checkpoints/channel_breakout_375_432.pt",
     "channel_breakout_v2_1_balanced": "checkpoints/channel_breakout_v2_1_balanced.pt",
+    "channel_breakout_v2_2_mtg_bcd": "checkpoints/channel_breakout_v2_2_mtg_bcd.json",
     "channel_breakout": "checkpoints/eth_optimal.pt",
     "hybrid_mm": "checkpoints/quant_model.pt",
 }
@@ -1313,7 +1308,10 @@ def print_status(account_api, inst_id, state, leverage=1.0, contract_value=1.0):
             f"allow_L={state.get('v21_allow_long', '?')} "
             f"allow_S={state.get('v21_allow_short', '?')} | "
             f"raw={state.get('v21_raw_signal', '?')} "
-            f"routed={state.get('v21_routed_signal', '?')}"
+            f"permission={state.get('v21_permission_signal', '?')} "
+            f"routed={state.get('v21_routed_signal', '?')} | "
+            f"overlay={state.get('v21_exit_overlays_enabled', False)} "
+            f"overlay_changed={state.get('v21_exit_overlay_changed', False)}"
         )
     log_message(f"持仓状态: {pos_str}")
     if state.get("pending_open"):
@@ -1346,63 +1344,25 @@ def _v21_generate_signal(
     enable_short: bool,
     adx_gate_threshold: float = 0.0,
     adx_gate_regimes: tuple = (),
+    exit_logic: dict | None = None,
+    exit_overlays_enabled: bool = True,
 ) -> tuple:
-    n = len(df)
-    bull_raw = generate_strategy_signals(bull_s, df, enable_short=bull_s.enable_short)
-    bear_raw = generate_strategy_signals(bear_s, df, enable_short=bear_s.enable_short)
-    neutral_raw = generate_strategy_signals(neutral_s, df, enable_short=neutral_s.enable_short)
-    regimes = build_daily_regime_labels(df, fast_days=regime_fast, slow_days=regime_slow)
-    adx_full, _, _ = compute_adx(df, 14)
-    daily_ctx = compute_daily_indicators(df)
-    routed = route_regime_signals(
-        bull_raw, bear_raw, neutral_raw, regimes, regime_change_policy=policy
+    return generate_live_regime_channel_breakout_signal(
+        df,
+        bull_s,
+        bear_s,
+        neutral_s,
+        bull_cfg,
+        bear_cfg,
+        neutral_cfg,
+        policy,
+        regime_fast,
+        regime_slow,
+        exit_logic=exit_logic,
+        exit_overlays_enabled=exit_overlays_enabled,
+        adx_gate_threshold=adx_gate_threshold,
+        adx_gate_regimes=adx_gate_regimes,
     )
-    al, as_arr, ff, eo = build_permission_arrays(
-        df, regimes, bull_cfg, bear_cfg, neutral_cfg, daily_ctx, adx_full
-    )
-    final_signals = apply_permission_arrays(routed, al, as_arr, ff, eo)
-
-    # ── ADX gate (runtime filter) ────────────────────────────────────
-    adx_gate_active = adx_gate_threshold > 0 and adx_gate_regimes
-    if adx_gate_active:
-        for j in range(n):
-            r = str(regimes[j])
-            if r in adx_gate_regimes and adx_full[j] < adx_gate_threshold:
-                final_signals[j] = 0  # force flat
-
-    i = n - 1
-    regime = str(regimes[i])
-    raw_sig = int(routed[i])
-    final_sig = int(final_signals[i])
-    adx_gated = adx_gate_active and regime in adx_gate_regimes and adx_full[i] < adx_gate_threshold
-    if ff[i]:
-        perm_reason = "force_flat"
-    elif eo[i]:
-        perm_reason = "exit_only"
-    elif adx_gated:
-        perm_reason = f"adx_gate (ADX={adx_full[i]:.1f}<{adx_gate_threshold}, {regime})"
-    elif raw_sig == 2 and final_sig != 2:
-        perm_reason = f"long_blocked (regime={regime})"
-    elif raw_sig == 3 and final_sig != 3:
-        perm_reason = f"short_blocked (regime={regime})"
-    elif final_sig in (2, 3):
-        perm_reason = f"allowed (regime={regime})"
-    elif final_sig == 0:
-        perm_reason = f"close (regime={regime})"
-    else:
-        perm_reason = f"hold (regime={regime})"
-    return final_sig, {
-        "regime": regime,
-        "permission_reason": perm_reason,
-        "allow_long": bool(al[i]),
-        "allow_short": bool(as_arr[i]),
-        "force_flat": bool(ff[i]) or adx_gated,
-        "exit_only": bool(eo[i]),
-        "raw_signal": raw_sig,
-        "routed_signal": int(final_signals[i]),
-        "adx_gate_active": adx_gate_active,
-        "adx_gate_threshold": adx_gate_threshold if adx_gate_active else 0,
-    }
 
 
 def _signal_name(sig: int) -> str:
@@ -1459,6 +1419,11 @@ def main():
         help="只观察行情和策略信号，不执行持仓同步、撤单、下单或状态保存",
     )
     parser.add_argument(
+        "--disable-exit-overlays",
+        action="store_true",
+        help="关闭 v2.2 exit overlays，用于快速回退到 v2.1-like 信号语义",
+    )
+    parser.add_argument(
         "--notify-email-to",
         type=str,
         default=os.environ.get("TRADE_NOTIFY_EMAIL_TO", ""),
@@ -1495,12 +1460,14 @@ def main():
     interval_seconds = INTERVAL_SECONDS_MAP.get(args.interval, 300)
     enable_short = not args.long_only
     mode_str = "多空双向" if enable_short else "只做多"
+    checkpoint_override = args.checkpoint is not None
     args.checkpoint = resolve_checkpoint_path(args.checkpoint, args.strategy_profile)
 
     # 加载策略参数
     log_message("=" * 50)
     log_message(f"启动 {mode_name} ({mode_str})")
-    log_message(f"策略档案: {args.strategy_profile}")
+    profile_note = " (overridden by --checkpoint)" if checkpoint_override else ""
+    log_message(f"策略档案: {args.strategy_profile}{profile_note}")
     log_message(f"Checkpoint: {args.checkpoint}")
     if args.signal_only:
         log_message("Signal-Only: 只生成信号，不执行任何账户/订单操作")
@@ -1533,12 +1500,19 @@ def main():
         v21_policy = checkpoint.get("regime_change_policy", "permission_based")
         v21_regime_fast = checkpoint.get("regime_filter", {}).get("fast_days", 50)
         v21_regime_slow = checkpoint.get("regime_filter", {}).get("slow_days", 200)
+        v21_exit_logic = checkpoint.get("exit_logic")
+        v21_exit_overlays_enabled = bool(v21_exit_logic) and not args.disable_exit_overlays
         strategy = None
         strategy_type = checkpoint.get("strategy_type", "regime_permission_channel_breakout")
         log_message(f"BULL:  {checkpoint['bull']['candidate']}")
         log_message(f"BEAR:  {checkpoint['bear']['candidate']}")
         log_message(f"NEUTRAL: {checkpoint['neutral']['candidate']}")
         log_message(f"Policy: {v21_policy}")
+        log_message(
+            "Exit overlays: "
+            + ("enabled" if v21_exit_overlays_enabled else "disabled")
+            + ("" if v21_exit_logic else " (no exit_logic)")
+        )
         if args.adx_gate_threshold > 0 and args.adx_gate_regimes:
             log_message(
                 f"ADX gate ENABLED: threshold={args.adx_gate_threshold} "
@@ -1593,6 +1567,8 @@ def main():
         v21_policy = ""
         v21_regime_fast = 50
         v21_regime_slow = 200
+        v21_exit_logic = None
+        v21_exit_overlays_enabled = False
 
     # 初始化 OKX API
     if args.signal_only:
@@ -1632,6 +1608,9 @@ def main():
             "entry_price": 0.0,
             "entry_bar": 0,
             "pending_open": False,
+            "v21_permission_signal": 1,
+            "v21_exit_overlays_enabled": False,
+            "v21_exit_overlay_changed": False,
         }
         log_message("Signal-Only 使用临时内存状态，不读取/写入交易状态文件")
     else:
@@ -1672,7 +1651,10 @@ def main():
             "v21_force_flat": False,
             "v21_exit_only": False,
             "v21_raw_signal": 1,
+            "v21_permission_signal": 1,
             "v21_routed_signal": 1,
+            "v21_exit_overlays_enabled": False,
+            "v21_exit_overlay_changed": False,
             "pending_close": False,
             "pending_close_order_id": None,
             "pending_close_reason": "",
@@ -1706,7 +1688,10 @@ def main():
         state.setdefault("v21_force_flat", False)
         state.setdefault("v21_exit_only", False)
         state.setdefault("v21_raw_signal", 1)
+        state.setdefault("v21_permission_signal", 1)
         state.setdefault("v21_routed_signal", 1)
+        state.setdefault("v21_exit_overlays_enabled", False)
+        state.setdefault("v21_exit_overlay_changed", False)
         state.setdefault("pending_close", False)
         state.setdefault("pending_close_order_id", None)
         state.setdefault("pending_close_reason", "")
@@ -1970,6 +1955,8 @@ def main():
                             enable_short,
                             adx_gate_threshold=args.adx_gate_threshold,
                             adx_gate_regimes=args.adx_gate_regimes,
+                            exit_logic=v21_exit_logic,
+                            exit_overlays_enabled=v21_exit_overlays_enabled,
                         )
                         current_price = float(df.iloc[-1]["close"])
                         current_time = df.iloc[-1]["datetime"]
@@ -1981,13 +1968,21 @@ def main():
                         state["v21_force_flat"] = v21_diag["force_flat"]
                         state["v21_exit_only"] = v21_diag["exit_only"]
                         state["v21_raw_signal"] = v21_diag["raw_signal"]
+                        state["v21_permission_signal"] = v21_diag["permission_signal"]
                         state["v21_routed_signal"] = v21_diag["routed_signal"]
                         state["v21_adx_gate_active"] = bool(v21_diag.get("adx_gate_active", False))
+                        state["v21_exit_overlays_enabled"] = bool(
+                            v21_diag.get("exit_overlays_enabled", False)
+                        )
+                        state["v21_exit_overlay_changed"] = bool(
+                            v21_diag.get("exit_overlay_changed", False)
+                        )
                         log_message(
                             f"K线: {current_time} | 价格: {current_price:.2f} | "
                             f"regime={v21_diag['regime']} | "
                             f"signal={signal_id} ({_signal_name(signal_id)}) | "
-                            f"perm={v21_diag['permission_reason']}"
+                            f"perm={v21_diag['permission_reason']} | "
+                            f"overlay={v21_diag.get('exit_overlays_enabled', False)}"
                         )
                         # v2.1 permission-based exit
                         if v21_diag["force_flat"]:
@@ -2046,7 +2041,11 @@ def main():
                                 f"[Signal-Only] signal={signal_id} {signal_labels.get(signal_id, '未知')} | "
                                 f"v2.1: regime={state.get('v21_regime', '?')} "
                                 f"perm={state.get('v21_permission_reason', '?')} | "
-                                f"raw={state.get('v21_raw_signal', '?')} routed={state.get('v21_routed_signal', '?')} | "
+                                f"raw={state.get('v21_raw_signal', '?')} "
+                                f"permission={state.get('v21_permission_signal', '?')} "
+                                f"routed={state.get('v21_routed_signal', '?')} | "
+                                f"overlay={state.get('v21_exit_overlays_enabled', False)} "
+                                f"overlay_changed={state.get('v21_exit_overlay_changed', False)} | "
                                 f"adx_gate={state.get('v21_adx_gate_active', False)}"
                             )
                         else:

@@ -46,12 +46,13 @@ import ccxt
 import pandas as pd
 
 from dex.checkpoints import (
+    build_channel_breakout_strategy_from_checkpoint,
     build_strategy_from_checkpoint,
     describe_strategy,
+    is_regime_channel_breakout_checkpoint,
     load_checkpoint,
 )
 from dex.data import list_crypto_files, load_crypto_data
-from dex.indicators import compute_adx
 from dex.live.common import (
     compute_order_price,
     plan_close_order,
@@ -60,16 +61,10 @@ from dex.live.common import (
     round_to_tick,
     send_trade_notification,
 )
-from dex.regime_filter import build_daily_regime_labels
+from dex.live.signals import generate_live_regime_channel_breakout_signal
 from dex.regime_permissions import (
     RiskOffConfig,
-    apply_permission_arrays,
-    build_permission_arrays,
-    compute_daily_indicators,
-    route_regime_signals,
 )
-from dex.strategies.channel_breakout import ChannelBreakoutTrendStrategy
-from dex.strategy_signals import generate_strategy_signals
 
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -87,6 +82,22 @@ INTERVAL_SECONDS_MAP = {
     "4h": 14400,
     "1d": 86400,
 }
+
+BITGET_STRATEGY_PROFILES = {
+    "channel_breakout_v2_1_balanced": "checkpoints/channel_breakout_v2_1_balanced.pt",
+    "channel_breakout_v2_2_mtg_bcd": "checkpoints/channel_breakout_v2_2_mtg_bcd.json",
+}
+
+
+def resolve_checkpoint_path(checkpoint_path: str | None, strategy_profile: str) -> str:
+    """Resolve the checkpoint used by the Bitget live entrypoint."""
+    if checkpoint_path:
+        return checkpoint_path
+    try:
+        return BITGET_STRATEGY_PROFILES[strategy_profile]
+    except KeyError as exc:
+        known = ", ".join(sorted(BITGET_STRATEGY_PROFILES))
+        raise ValueError(f"未知策略档案 {strategy_profile!r}; 可选: {known}") from exc
 
 CCXT_INTERVAL_MAP = {
     "1m": "1m",
@@ -1455,7 +1466,10 @@ def print_status(exchange, symbol, state, leverage=1.0):
             f"allow_L={state.get('v21_allow_long', '?')} "
             f"allow_S={state.get('v21_allow_short', '?')} | "
             f"raw={state.get('v21_raw_signal', '?')} "
-            f"routed={state.get('v21_routed_signal', '?')}"
+            f"permission={state.get('v21_permission_signal', '?')} "
+            f"routed={state.get('v21_routed_signal', '?')} | "
+            f"overlay={state.get('v21_exit_overlays_enabled', False)} "
+            f"overlay_changed={state.get('v21_exit_overlay_changed', False)}"
         )
     log_message(f"持仓状态: {pos_str}")
     if state.get("pending_open"):
@@ -1491,82 +1505,27 @@ def _v21_generate_signal(
     regime_fast: int,
     regime_slow: int,
     enable_short: bool,
+    exit_logic: dict | None = None,
+    exit_overlays_enabled: bool = True,
 ) -> tuple:
     """Generate signal through v2.1 regime-permission pipeline.
 
     Returns (final_signal, diagnostic_dict).
     """
-    n = len(df)
-
-    # generate per-regime raw signals
-    bull_raw = generate_strategy_signals(
+    return generate_live_regime_channel_breakout_signal(
+        df,
         bull_s,
-        df,
-        enable_short=bull_s.enable_short if hasattr(bull_s, "enable_short") else False,
-    )
-    bear_raw = generate_strategy_signals(
         bear_s,
-        df,
-        enable_short=bear_s.enable_short if hasattr(bear_s, "enable_short") else True,
-    )
-    neutral_raw = generate_strategy_signals(
         neutral_s,
-        df,
-        enable_short=neutral_s.enable_short if hasattr(neutral_s, "enable_short") else True,
-    )
-
-    # regime labels
-    regimes = build_daily_regime_labels(df, fast_days=regime_fast, slow_days=regime_slow)
-    adx_full, _, _ = compute_adx(df, 14)
-    daily_ctx = compute_daily_indicators(df)
-
-    # route + permissions
-    routed = route_regime_signals(
-        bull_raw, bear_raw, neutral_raw, regimes, regime_change_policy=policy
-    )
-    al, as_arr, ff, eo = build_permission_arrays(
-        df,
-        regimes,
         bull_cfg,
         bear_cfg,
         neutral_cfg,
-        daily_ctx,
-        adx_full,
+        policy,
+        regime_fast,
+        regime_slow,
+        exit_logic=exit_logic,
+        exit_overlays_enabled=exit_overlays_enabled,
     )
-    final_signals = apply_permission_arrays(routed, al, as_arr, ff, eo)
-
-    # last bar diagnostics
-    i = n - 1
-    regime = str(regimes[i])
-    raw_sig = int(routed[i])
-    final_sig = int(final_signals[i])
-
-    # figure out permission reason for the last bar
-    if ff[i]:
-        perm_reason = "force_flat"
-    elif eo[i]:
-        perm_reason = "exit_only"
-    elif raw_sig == 2 and final_sig != 2:
-        perm_reason = f"long_blocked (regime={regime})"
-    elif raw_sig == 3 and final_sig != 3:
-        perm_reason = f"short_blocked (regime={regime})"
-    elif final_sig in (2, 3):
-        perm_reason = f"allowed (regime={regime})"
-    elif final_sig == 0:
-        perm_reason = f"close (regime={regime})"
-    else:
-        perm_reason = f"hold (regime={regime})"
-
-    return final_sig, {
-        "regime": regime,
-        "permission_reason": perm_reason,
-        "allow_long": bool(al[i]),
-        "allow_short": bool(as_arr[i]),
-        "force_flat": bool(ff[i]),
-        "exit_only": bool(eo[i]),
-        "raw_signal": raw_sig,
-        "routed_signal": int(final_signals[i]),
-    }
 
 
 def _signal_name(sig: int) -> str:
@@ -1758,7 +1717,17 @@ def main():
         "--interval", type=str, default="5m", help="K线周期: 1m, 5m, 15m, 1h, 4h, 1d"
     )
     parser.add_argument(
-        "--checkpoint", type=str, default="checkpoints/quant_model.pt", help="策略参数路径"
+        "--strategy-profile",
+        type=str,
+        default="channel_breakout_v2_1_balanced",
+        choices=sorted(BITGET_STRATEGY_PROFILES),
+        help="内置策略档案；默认 channel_breakout_v2_1_balanced",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="自定义策略参数路径；不填时使用 --strategy-profile 对应的 checkpoint",
     )
     parser.add_argument("--capital", type=float, default=100.0, help="每次交易保证金（USDT）")
     parser.add_argument("--leverage", type=float, default=1.0, help="杠杆倍数")
@@ -1777,6 +1746,11 @@ def main():
         "--signal-only",
         action="store_true",
         help="只输出信号和 permission 诊断信息，不下单（用于 v2.1 regime_permission checkpoint 观察）",
+    )
+    parser.add_argument(
+        "--disable-exit-overlays",
+        action="store_true",
+        help="关闭 v2.2 exit overlays，用于快速回退到 v2.1-like 信号语义",
     )
     parser.add_argument(
         "--notify-email-to",
@@ -1799,10 +1773,15 @@ def main():
     interval_seconds = INTERVAL_SECONDS_MAP.get(args.interval, 300)
     enable_short = not args.long_only
     mode_str = "多空双向" if enable_short else "只做多"
+    checkpoint_override = args.checkpoint is not None
+    args.checkpoint = resolve_checkpoint_path(args.checkpoint, args.strategy_profile)
 
     # 加载策略参数
     log_message("=" * 50)
     log_message(f"启动 {mode_name} ({mode_str})")
+    profile_note = " (overridden by --checkpoint)" if checkpoint_override else ""
+    log_message(f"策略档案: {args.strategy_profile}{profile_note}")
+    log_message(f"Checkpoint: {args.checkpoint}")
     log_message("混合费率: 开仓=Maker, 止盈=Maker, 止损=Taker, 超时=Maker")
     log_message(f"杠杆: {args.leverage}x")
     log_message(f"交易对: {args.symbol} -> {symbol}")
@@ -1812,18 +1791,18 @@ def main():
 
     checkpoint = load_checkpoint(args.checkpoint)
 
-    # ── detect v2.1 regime_permission checkpoint ──────────────────────────
-    is_v21 = checkpoint.get("strategy_type") == "regime_permission_channel_breakout"
+    # ── detect v2.1/v2.2 regime_permission-compatible checkpoint ──────────
+    is_v21 = is_regime_channel_breakout_checkpoint(checkpoint)
 
     if is_v21:
-        log_message("检测到 v2.1 regime_permission checkpoint")
+        log_message(f"检测到 v2.1-compatible checkpoint: {checkpoint.get('strategy_type')}")
         log_message(f"  variant: {checkpoint.get('variant', '?')}")
         log_message(f"  status: {checkpoint.get('status', '?')}")
 
         # build per-regime strategies
-        v21_bull_s = ChannelBreakoutTrendStrategy(**checkpoint["bull"]["strategy_params"])
-        v21_bear_s = ChannelBreakoutTrendStrategy(**checkpoint["bear"]["strategy_params"])
-        v21_neutral_s = ChannelBreakoutTrendStrategy(**checkpoint["neutral"]["strategy_params"])
+        v21_bull_s = build_channel_breakout_strategy_from_checkpoint(checkpoint, "bull")
+        v21_bear_s = build_channel_breakout_strategy_from_checkpoint(checkpoint, "bear")
+        v21_neutral_s = build_channel_breakout_strategy_from_checkpoint(checkpoint, "neutral")
 
         v21_bull_cfg = RiskOffConfig(**checkpoint["bull"]["permission"])
         v21_bear_cfg = RiskOffConfig(**checkpoint["bear"]["permission"])
@@ -1831,13 +1810,20 @@ def main():
         v21_policy = checkpoint.get("regime_change_policy", "permission_based")
         v21_regime_fast = checkpoint.get("regime_filter", {}).get("fast_days", 50)
         v21_regime_slow = checkpoint.get("regime_filter", {}).get("slow_days", 200)
+        v21_exit_logic = checkpoint.get("exit_logic")
+        v21_exit_overlays_enabled = bool(v21_exit_logic) and not args.disable_exit_overlays
 
         strategy = None  # v2.1 doesn't use a single strategy
-        strategy_type = "regime_permission_channel_breakout"
+        strategy_type = checkpoint.get("strategy_type", "regime_permission_channel_breakout")
         log_message(f"BULL:  {checkpoint['bull']['candidate']}")
         log_message(f"BEAR:  {checkpoint['bear']['candidate']}")
         log_message(f"NEUTRAL: {checkpoint['neutral']['candidate']}")
         log_message(f"Policy: {v21_policy}")
+        log_message(
+            "Exit overlays: "
+            + ("enabled" if v21_exit_overlays_enabled else "disabled")
+            + ("" if v21_exit_logic else " (no exit_logic)")
+        )
     else:
         # ── legacy single-strategy checkpoint ─────────────────────────────
         params = dict(checkpoint.get("params") or {})
@@ -1858,6 +1844,8 @@ def main():
         v21_policy = ""
         v21_regime_fast = 50
         v21_regime_slow = 200
+        v21_exit_logic = None
+        v21_exit_overlays_enabled = False
 
     # 初始化 Bitget API
     exchange = init_bitget_api(demo=args.demo)
@@ -1915,7 +1903,10 @@ def main():
             "v21_force_flat": False,
             "v21_exit_only": False,
             "v21_raw_signal": 1,
+            "v21_permission_signal": 1,
             "v21_routed_signal": 1,
+            "v21_exit_overlays_enabled": False,
+            "v21_exit_overlay_changed": False,
             # pending_close fields
             "pending_close": False,
             "pending_close_order_id": None,
@@ -1954,7 +1945,10 @@ def main():
         state.setdefault("v21_force_flat", False)
         state.setdefault("v21_exit_only", False)
         state.setdefault("v21_raw_signal", 1)
+        state.setdefault("v21_permission_signal", 1)
         state.setdefault("v21_routed_signal", 1)
+        state.setdefault("v21_exit_overlays_enabled", False)
+        state.setdefault("v21_exit_overlay_changed", False)
         state.setdefault("pending_close", False)
         state.setdefault("pending_close_order_id", None)
         state.setdefault("pending_close_reason", "")
@@ -2012,7 +2006,10 @@ def main():
             "v21_force_flat": False,
             "v21_exit_only": False,
             "v21_raw_signal": 1,
+            "v21_permission_signal": 1,
             "v21_routed_signal": 1,
+            "v21_exit_overlays_enabled": False,
+            "v21_exit_overlay_changed": False,
             "pending_close": False,
             "pending_close_order_id": None,
             "pending_close_reason": "",
@@ -2333,6 +2330,8 @@ def main():
                             v21_regime_fast,
                             v21_regime_slow,
                             enable_short,
+                            exit_logic=v21_exit_logic,
+                            exit_overlays_enabled=v21_exit_overlays_enabled,
                         )
                         # store permission info in state for logging
                         state["v21_regime"] = v21_diag["regime"]
@@ -2342,23 +2341,34 @@ def main():
                         state["v21_force_flat"] = v21_diag["force_flat"]
                         state["v21_exit_only"] = v21_diag["exit_only"]
                         state["v21_raw_signal"] = v21_diag["raw_signal"]
+                        state["v21_permission_signal"] = v21_diag["permission_signal"]
                         state["v21_routed_signal"] = v21_diag["routed_signal"]
+                        state["v21_exit_overlays_enabled"] = bool(
+                            v21_diag.get("exit_overlays_enabled", False)
+                        )
+                        state["v21_exit_overlay_changed"] = bool(
+                            v21_diag.get("exit_overlay_changed", False)
+                        )
 
                         log_message(
                             f"K线: {current_time} | 价格: {current_price:.2f} | "
                             f"regime={v21_diag['regime']} | "
                             f"signal={signal_id} ({_signal_name(signal_id)}) | "
-                            f"perm={v21_diag['permission_reason']}"
+                            f"perm={v21_diag['permission_reason']} | "
+                            f"overlay={v21_diag.get('exit_overlays_enabled', False)}"
                         )
 
                         if args.signal_only:
                             log_message(
                                 f"[SIGNAL-ONLY] raw={v21_diag['raw_signal']} "
+                                f"permission={v21_diag['permission_signal']} "
                                 f"routed={v21_diag['routed_signal']} "
                                 f"allow_long={v21_diag['allow_long']} "
                                 f"allow_short={v21_diag['allow_short']} "
                                 f"force_flat={v21_diag['force_flat']} "
-                                f"exit_only={v21_diag['exit_only']}"
+                                f"exit_only={v21_diag['exit_only']} "
+                                f"overlay={v21_diag.get('exit_overlays_enabled', False)} "
+                                f"overlay_changed={v21_diag.get('exit_overlay_changed', False)}"
                             )
                             # skip all trading logic for signal-only
                             save_state(state)
