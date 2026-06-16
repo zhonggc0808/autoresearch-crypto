@@ -1464,7 +1464,7 @@ def main():
         default=os.environ.get("TRADE_NOTIFY_EMAIL_TO", ""),
         help="交易动作邮件通知收件人；也可用 TRADE_NOTIFY_EMAIL_TO 配置",
     )
-    parser.add_argument("--stop-loss", type=float, default=0.03, help="止损百分比（默认 3%%）")
+    parser.add_argument("--stop-loss", type=float, default=0.0, help="止损百分比（默认关闭；建议 ≤0.10）")
     parser.add_argument("--max-hold", type=int, default=48, help="最大持仓K线数（默认 48）")
     parser.add_argument("--short", action="store_true", default=True, help="启用做空（默认开启）")
     parser.add_argument("--long-only", action="store_true", help="只做多，不做空")
