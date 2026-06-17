@@ -277,6 +277,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from dex.strategies.trade_ledger import enrich_trade_ledger
 
@@ -420,9 +421,6 @@ def test_enrich_time_fields() -> None:
     assert "time_to_mae_hours" in t
     assert "time_to_mfe_hours" in t
     assert t["time_to_mae_hours"] == t["time_to_mae_bars"] * 5 / 60
-
-
-import pytest
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -627,8 +625,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 **Interfaces:**
 - Consumes: `enrich_trade_ledger()` from `dex.strategies.trade_ledger`
 - Consumes: `StrategyEvaluator` from `dex.strategies.base`
-- Consumes: Checkpoint `channel_breakout_375_432.pt` for signals
 - Produces: CSV ledger + Markdown report in `research_workspace/diagnostics/`
+- Signal source: `ChannelBreakoutTrendStrategy(entry_lookback=375, min_hold_bars=432)` — this replicates the v2 naked `375/432` signal without loading a .pt checkpoint file. The params are hardcoded to match the checkpoint exactly, so signal output is identical.
 
 - [ ] **Step 1: Create output directory**
 
@@ -797,29 +795,48 @@ def generate_report(trades: list[dict], df: pd.DataFrame) -> str:
 
     # Question 5: Time-in-loss horizon analysis
     lines.append("## Q5: Horizon Unrealized PnL")
+    close_arr = df_oos["close"].to_numpy(dtype=float)
     for hours in [48, 72, 96]:
         horizon_bars = int(hours * 60 / TIMEFRAME_MINUTES)
         lines.append(f"\n### {hours}h horizon ({horizon_bars} bars)")
-        # Compute unrealized return at horizon for trades that lasted that long
-        horizon_results = []
+        # Compute unrealized return at the horizon bar close for each trade
+        # that lasted long enough to reach the horizon.
+        buckets = {"all": [], "< -3%": [], "< -2%": [], "< -1%": [], "< 0": []}
         for t in trades:
-            if t["duration_bars"] > horizon_bars:
-                horizon_results.append({
-                    "final_pnl": t["pnl"],
-                    "final_return": t["return_pct"],
-                })
-        if horizon_results:
-            final_pnls = [r["final_pnl"] for r in horizon_results]
-            lines.append(f"- Trades lasting > {hours}h: {len(horizon_results)}")
-            lines.append(f"- Median final PnL: {np.median(final_pnls):.1f}")
-        else:
-            lines.append(f"- No trades lasting > {hours}h")
+            entry_s = t["entry_step"]
+            exit_s = t["exit_step"]
+            horizon_s = entry_s + horizon_bars
+            if exit_s <= horizon_s:
+                continue  # trade closed before reaching horizon
+            horizon_price = float(close_arr[horizon_s])
+            entry_px = t["entry_price"]
+            if t["side"] == "long":
+                unrealized = horizon_price / entry_px - 1.0
+            else:
+                unrealized = 1.0 - horizon_price / entry_px
+            buckets["all"].append(t["pnl"])
+            if unrealized < -0.03:
+                buckets["< -3%"].append(t["pnl"])
+            elif unrealized < -0.02:
+                buckets["< -2%"].append(t["pnl"])
+            elif unrealized < -0.01:
+                buckets["< -1%"].append(t["pnl"])
+            elif unrealized < 0:
+                buckets["< 0"].append(t["pnl"])
+        lines.append(f"- Trades reaching {hours}h: {len(buckets['all'])}")
+        for label in ["< -3%", "< -2%", "< -1%", "< 0"]:
+            pnls = buckets[label]
+            if pnls:
+                lines.append(f"  - Unrealized {label} at {hours}h: {len(pnls)} trades, "
+                             f"median final PnL: {np.median(pnls):.1f}")
+            else:
+                lines.append(f"  - Unrealized {label} at {hours}h: 0 trades")
 
     # Question 6: BE stop killed winners
     lines.append("\n## Q6: Break-Even Stop — Killed Big Winners")
     for trigger in [0.03, 0.04]:
         for stop_level in [0.0, 0.005]:
-            killed = _count_be_killed(big_winners, trigger, stop_level)
+            killed = _count_be_killed(big_winners, trigger, stop_level, df_oos)
             pct = killed / len(big_winners) * 100 if big_winners else 0
             lines.append(f"- BE trigger +{trigger:.0%}, stop {stop_level:.1%}: "
                           f"killed {killed}/{len(big_winners)} ({pct:.1f}%)")
@@ -850,7 +867,7 @@ def generate_report(trades: list[dict], df: pd.DataFrame) -> str:
     ) if big_winners else 0
     med_tmae_h = np.median(tmae_hours) if tmae_hours else 0
     be_kill_pct = (
-        _count_be_killed(big_winners, 0.03, 0.0) / len(big_winners) * 100
+        _count_be_killed(big_winners, 0.03, 0.0, df_oos) / len(big_winners) * 100
     ) if big_winners else 0
 
     lines.append(f"- Big winners with MAE worse than -5%: {big_winner_mae5_pct:.1f}%")
@@ -873,21 +890,47 @@ def generate_report(trades: list[dict], df: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
-def _count_be_killed(trades: list[dict], trigger_mfe: float, stop_level: float) -> int:
+def _count_be_killed(
+    trades: list[dict],
+    trigger_mfe: float,
+    stop_level: float,
+    df: pd.DataFrame,
+) -> int:
     """Count how many trades would be killed by a break-even stop.
 
-    For each trade: check if MFE >= trigger_mfe, and if so, whether the
-    price retraced to <= stop_level before exit. This uses the trade-level
-    MFE (from high/low) and final return (from close-to-close) as a proxy.
-    A more precise per-bar path check would require the full price arrays.
+    Per-bar path detection: for each trade, scan the intratrade price
+    path. If MFE (using bar high/low) reaches trigger_mfe, and then
+    close return retraces to <= stop_level before final exit, the trade
+    is killed.
     """
     killed = 0
+    high_arr = df["high"].to_numpy(dtype=float)
+    low_arr = df["low"].to_numpy(dtype=float)
+    close_arr = df["close"].to_numpy(dtype=float)
+
     for t in trades:
-        if t["mfe_pct"] >= trigger_mfe:
-            # Proxy: if MFE was high but final return dropped to stop_level,
-            # a BE stop would have triggered during the retrace.
-            if t["return_pct"] <= stop_level:
+        entry_s = t["entry_step"]
+        exit_s = t["exit_step"]
+        entry_px = t["entry_price"]
+        side = t["side"]
+
+        # Scan bars from entry_step+1 to exit_step
+        triggered = False
+        for bar in range(entry_s + 1, exit_s + 1):
+            # Update MFE from high/low
+            if side == "long":
+                mfe = high_arr[bar] / entry_px - 1.0
+                ret = close_arr[bar] / entry_px - 1.0
+            else:
+                mfe = 1.0 - low_arr[bar] / entry_px
+                ret = 1.0 - close_arr[bar] / entry_px
+
+            if mfe >= trigger_mfe:
+                triggered = True
+            if triggered and ret <= stop_level:
                 killed += 1
+                break  # killed at this bar, stop scanning this trade
+
     return killed
 
 
@@ -1089,11 +1132,28 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 
 ## Plan B: Phase 2 Simulator Infrastructure
 
-### Task B1: Add stop_config parameter and per-bar execution skeleton to simulate()
+### Task B1: Add stop_config parameter and per-bar execution order to simulate()
 
 **Files:**
 - Modify: `dex/strategies/base.py:92-97` (simulate signature)
-- Modify: `dex/strategies/base.py:139-237` (main loop body)
+- Modify: `dex/strategies/base.py:139-237` (main loop body — restructure)
+
+**Goal:** Refactor `simulate()` to accept optional `stop_config` and enforce the per-bar execution order from spec Section 4.2.
+
+**Per-bar order (must match this exactly):**
+1. Mark existing position to `close[i]` (unrealized PnL)
+2. Update `peak_equity` and `dd_abs`
+3. If a position is open:
+   a. Check kill_switch (DD ≥ kill_switch_dd → close position, record `exit_reason="kill_switch"`)
+   b. Check strategy signal for exit/reverse
+   c. If strategy did NOT exit, check risk stops via `_check_risk_stops()`
+   d. Execute at most ONE risk action per bar (close > reduce_half)
+4. If flat after step 3 and no kill_switch / no_new_entry block:
+   a. Process new entry signal
+   b. New position is **immune** to risk stops on bar `i`
+5. Record equity and trade events
+
+**base_size is the only position source:** When `stop_config` is present, `position_sizes` is ignored. Entry multiplier = `stop_config.base_size * dd_multiplier`.
 
 **Interfaces:**
 - Consumes: existing `simulate()` parameters
@@ -1104,11 +1164,39 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 
 Add to `tests/test_evaluator.py`:
 ```python
-def test_stop_config_new_entry_immune_on_same_bar() -> None:
-    """A position opened on bar i cannot be stopped on bar i."""
+def test_stop_cannot_fire_on_entry_bar() -> None:
+    """Invariant: a position opened on bar i cannot be stopped on bar i.
+
+    Entry at bar 0, bar 1 has signal=0 (natural exit). The stop must NOT
+    fire on bar 0. But the natural exit on bar 1 is not a stop — we check
+    that no stop-triggered event exists with step == entry_step.
+    """
     evaluator = StrategyEvaluator(initial_capital=100.0, commission=0.0, slippage=0.0)
-    signals = np.array([2, 1, 0])
-    prices = np.array([100.0, 90.0, 90.0])  # bar 1 drops -10% — but entry was on bar 0
+    signals = np.array([2, 0])
+    prices = np.array([100.0, 110.0])  # +10% — no adverse stop trigger anyway
+
+    stop_config = {
+        "base_size": 1.0,
+        "adverse_stop": {
+            "enabled": True,
+            "threshold_pct": -0.05,
+            "action": "close",
+            "trigger_source": "close",
+        },
+    }
+
+    _, trades = evaluator.simulate(signals, prices, stop_config=stop_config)
+    # No stop-triggered events should exist
+    stop_events = [t for t in trades if t.get("exit_reason") == "adverse_stop"]
+    assert len(stop_events) == 0
+
+
+def test_stop_can_fire_on_entry_step_plus_one() -> None:
+    """A stop CAN fire on entry_step+1 — it is not the entry bar."""
+    evaluator = StrategyEvaluator(initial_capital=100.0, commission=0.0, slippage=0.0)
+    # Entry at bar 0. Bar 1 drops -10%. Stop window starts at bar 1 (entry_step+1).
+    signals = np.array([2, 1, 1, 1])
+    prices = np.array([100.0, 90.0, 90.0, 90.0])
 
     stop_config = {
         "base_size": 1.0,
@@ -1122,15 +1210,11 @@ def test_stop_config_new_entry_immune_on_same_bar() -> None:
 
     _, trades = evaluator.simulate(signals, prices, stop_config=stop_config)
 
-    # The long was opened on bar 0. Bar 1 close = 90, which is -10% from entry.
-    # But bar 1 is the FIRST bar after entry — stop should fire (entry_step=0, bar=1 > 0+1? No, it's == 0+1)
-    # Actually entry_step=0, stop window starts at bar 1 (entry_step+1).
-    # Bar 1 IS in window. So stop SHOULD fire. Let's verify it does.
-    close_events = [t for t in trades if t.get("pnl") is not None]
-    assert len(close_events) == 1
-    # The close should be from adverse_stop, not a natural signal exit
-    sell = [t for t in trades if t["type"] == "sell"]
-    assert len(sell) > 0
+    # Bar 1 close = 90, unrealized = -10% → adverse_stop should trigger
+    stop_closes = [t for t in trades if t.get("exit_reason") == "adverse_stop"]
+    assert len(stop_closes) >= 1
+    # The stop step must be > entry_step (it is: 1 > 0)
+    assert all(ev["step"] > ev["entry_step"] for ev in stop_closes)
 
 
 def test_stop_config_base_size_only_position_source() -> None:
@@ -1288,31 +1372,6 @@ def test_equity_dd_sizing_reduces_entry_after_drawdown() -> None:
     assert buy_events[1]["entry_size"] < buy_events[0]["entry_size"]
 
 
-def test_equity_dd_kill_switch_closes_position() -> None:
-    """At kill_switch_dd, existing position is closed."""
-    evaluator = StrategyEvaluator(initial_capital=100.0, commission=0.0, slippage=0.0)
-    signals = np.array([2, 1, 1, 1])
-    prices = np.array([100.0, 70.0, 70.0, 70.0])  # -30% DD
-
-    stop_config = {
-        "base_size": 1.0,
-        "equity_dd_sizing": {
-            "enabled": True,
-            "tiers": [(0.05, 1.00)],
-            "no_new_entry_dd": 0.20,
-            "kill_switch_dd": 0.25,
-        },
-    }
-
-    _, trades = evaluator.simulate(signals, prices, stop_config=stop_config)
-
-    close_events = [t for t in trades if t.get("pnl") is not None]
-    assert len(close_events) >= 1
-    # The close should be from kill_switch
-    kill_events = [t for t in close_events if t.get("exit_reason") == "kill_switch"]
-    assert len(kill_events) >= 1
-
-
 def test_no_new_entry_blocks_entries_but_allows_close() -> None:
     """no_new_entry allows closing but prevents opening new positions."""
     evaluator = StrategyEvaluator(initial_capital=100.0, commission=0.0, slippage=0.0)
@@ -1431,14 +1490,17 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 
 ---
 
-### Task B3: Implement adverse move partial stop
+### Task B3: Implement adverse move partial stop (check + execution)
 
 **Files:**
-- Modify: `dex/strategies/base.py` — `_check_risk_stops()` implementation
+- Modify: `dex/strategies/base.py` — `_check_risk_stops()` + `_execute_reduce_half()` + main loop wiring
 
 **Interfaces:**
 - Consumes: `stop_config["adverse_stop"]`
-- Produces: `reduce_half` or `close` action for adverse moves
+- Produces: partial close events with `is_partial=True`, `exit_reason="adverse_stop"`, `parent_trade_id`
+
+This task implements BOTH the trigger check and the reduce_half/close execution.
+There is no separate "wire execution" task — the test below requires real events.
 
 - [ ] **Step 1: Write test for adverse stop**
 
@@ -1748,8 +1810,44 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 - Modify: `dex/strategies/base.py` — main loop kill_switch block
 
 **Interfaces:**
-- Consumes: kill_switch state from DD sizing
-- Produces: immediate close events with `exit_reason="kill_switch"`
+- Consumes: kill_switch state from DD sizing (Task B2)
+- Produces: immediate close events with `exit_reason="kill_switch"`, `is_partial=False`
+
+- [ ] **Step 1: Write kill_switch close test**
+
+Add to `tests/test_evaluator.py`:
+```python
+def test_equity_dd_kill_switch_closes_position() -> None:
+    """At kill_switch_dd, existing position is closed with exit_reason."""
+    evaluator = StrategyEvaluator(initial_capital=100.0, commission=0.0, slippage=0.0)
+    signals = np.array([2, 1, 1, 1])
+    prices = np.array([100.0, 70.0, 70.0, 70.0])  # -30% DD → kill_switch
+
+    stop_config = {
+        "base_size": 1.0,
+        "equity_dd_sizing": {
+            "enabled": True,
+            "tiers": [(0.05, 1.00)],
+            "no_new_entry_dd": 0.20,
+            "kill_switch_dd": 0.25,
+        },
+    }
+
+    _, trades = evaluator.simulate(signals, prices, stop_config=stop_config)
+
+    close_events = [t for t in trades if t.get("pnl") is not None]
+    assert len(close_events) >= 1
+    kill_events = [t for t in close_events if t.get("exit_reason") == "kill_switch"]
+    assert len(kill_events) >= 1
+    assert kill_events[0]["is_partial"] is False
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests\test_evaluator.py::test_equity_dd_kill_switch_closes_position -v
+```
+Expected: FAIL (kill_switch close not yet implemented).
 
 - [ ] **Step 1: Implement kill_switch close execution**
 
@@ -1767,43 +1865,6 @@ Expected: PASS.
 ```bash
 git add dex/strategies/base.py
 git commit -m "feat: wire kill_switch close execution in simulate()
-```
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
-```
-
----
-
-### Task C2: Wire partial close (reduce_half) execution for adverse stop
-
-**Files:**
-- Modify: `dex/strategies/base.py` — main loop reduce_half block
-
-**Interfaces:**
-- Consumes: action dict from `_check_risk_stops()` with `action="reduce_half"`
-- Produces: partial close event with `is_partial=True`, `exit_reason`, `parent_trade_id`
-
-- [ ] **Step 1: Implement reduce_half execution**
-
-Add a `_execute_reduce_half()` function that:
-1. Sells half the shares
-2. Releases half the capital at risk + half the unrealized PnL
-3. Updates `shares`, `entry_cost_basis` proportionally
-4. Records a partial close event
-
-The event must include: `is_partial=True`, `parent_trade_id`, `exit_reason`, `closed_fraction=0.5`, `remaining_fraction=0.5`, `logical_trade_closed=False`.
-
-- [ ] **Step 2: Run adverse stop tests**
-
-```powershell
-.venv\Scripts\python.exe -m pytest tests\test_evaluator.py::test_adverse_stop_reduce_half_long -v
-```
-Expected: PASS.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add dex/strategies/base.py
-git commit -m "feat: implement reduce_half execution for adverse stop
 ```
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 ```
@@ -1871,29 +1932,31 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 
 ---
 
-### Task D2: One risk action per bar invariant test
+### Task D2: One risk action per bar invariant test (within this plan's scope)
 
 **Files:**
 - Modify: `tests/test_evaluator.py`
 
+**Note:** This plan only implements adverse_stop and DD sizing. A full multi-stop
+trigger test (adverse + time_in_loss + squeeze) belongs in the next plan. For now,
+verify that no bar produces more than one risk event for the same parent_trade_id.
+
 - [ ] **Step 1: Write invariant test**
 
 ```python
-def test_invariant_at_most_one_risk_action_per_bar() -> None:
-    """Invariant 6: At most one risk action per bar.
+def test_invariant_at_most_one_risk_close_per_bar() -> None:
+    """Invariant 6: At most one risk action per bar per parent_trade_id.
 
-    If multiple stops would trigger on the same bar, only the highest-priority
-    action executes.
+    Even with only adverse_stop enabled, verify the guard that prevents
+    multiple risk actions on the same bar. This test asserts the structure
+    exists; the full multi-stop trigger test belongs in the next plan.
     """
     evaluator = StrategyEvaluator(initial_capital=100.0, commission=0.0, slippage=0.0)
 
-    # Long position with -8% adverse move after 48h+ — could trigger both
-    # adverse_stop and time_in_loss_stop
-    n_bars = 600  # more than 48h (576 bars)
-    signals = np.array([2] + [1] * (n_bars - 1) + [0])
-    prices = np.full(n_bars + 1, 100.0, dtype=float)
-    prices[0] = 100.0
-    prices[300:] = 92.0  # -8% adverse move
+    # Long position with sustained -8% adverse move. Adverse stop should
+    # trigger once, not multiple times on successive bars.
+    signals = np.array([2] + [1] * 10 + [0])
+    prices = np.array([100.0] + [92.0] * 10 + [92.0])
 
     stop_config = {
         "base_size": 1.0,
@@ -1903,22 +1966,18 @@ def test_invariant_at_most_one_risk_action_per_bar() -> None:
             "action": "close",
             "trigger_source": "close",
         },
-        "time_in_loss_stop": {
-            "enabled": True,
-            "tiers": [(576, -0.02, "reduce_half")],
-        },
     }
 
     _, trades = evaluator.simulate(signals, prices, stop_config=stop_config)
 
-    # Count events at each bar
+    # Count risk events per bar per parent_trade_id
     from collections import Counter
-    close_steps = Counter(
-        t["step"] for t in trades if t.get("pnl") is not None and t.get("is_partial", False)
-    )
-    # No bar should have more than 1 risk action
-    for step, count in close_steps.items():
-        assert count <= 1, f"Bar {step} has {count} risk actions"
+    risk_events = [t for t in trades if t.get("exit_reason") is not None]
+    bar_counts = Counter((ev["step"], ev.get("parent_trade_id")) for ev in risk_events)
+    for (step, pid), count in bar_counts.items():
+        assert count <= 1, (
+            f"Bar {step} has {count} risk events for parent_trade_id {pid}"
+        )
 ```
 
 - [ ] **Step 2: Run invariant test**
@@ -2029,20 +2088,25 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 ```
 Plan A (Phase 0 + Phase 1, parallel):
   A1 → A2 → A3 → A4 (diagnostic pipeline)
-  A5 (fixed size matrix, independent)
+  A5 (fixed size matrix, independent of A3/A4)
 
 Plan B (Phase 2 infrastructure):
-  B1 (stop_config skeleton) → B2 (DD sizing) → B3 (adverse stop) → B4 (dual ledger)
+  B1 (per-bar order + stop_config) → B2 (DD sizing + no_new_entry)
+                                   → B3 (adverse stop: check + reduce_half execution)
+                                   → B4 (dual ledger aggregation)
 
 Plan C (Phase 2 execution wiring):
-  C1 (kill_switch close) → C2 (reduce_half partial close)
+  C1 (kill_switch close execution)
 
 Plan D (invariant tests):
   D1 → D2 → D3 → D4
 ```
 
 Plan B depends on Plan A1-A2 (entry fields in events).
-Plan C depends on Plan B.
-Plan D runs after Plan C, verifying all invariants.
+Plan C depends on Plan B1-B2 (DD tracking + per-bar order).
+Plan D runs after Plan B + C, verifying all invariants.
 
-**Not in this plan**: time-in-loss stop, squeeze stop, break-even stop, Monte Carlo integration, the full `run_risk_overlay_experiments.py` orchestration script. Those are deferred to a future plan after the Phase 2 infrastructure is validated.
+**Not in this plan**: time-in-loss stop, squeeze stop, break-even stop, Monte Carlo
+integration, the full `run_risk_overlay_experiments.py` orchestration script, and
+the multi-stop-trigger invariant test (D2 full version). Those are deferred to a
+future plan after the Phase 2 infrastructure is validated.
