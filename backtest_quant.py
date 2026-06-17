@@ -26,6 +26,13 @@ from dex.config import (
 )
 from dex.data import list_crypto_files, load_crypto_data
 from dex.drawdown_guard import DrawdownGuardStats, apply_drawdown_guard
+from dex.market_intel import (
+    MarketIntelOverlayStats,
+    RandomEntryControlStats,
+    build_market_intel_overlay,
+    build_random_entry_control,
+    load_market_intel,
+)
 from dex.regime_filter import (
     RegimeFilterStats,
     apply_regime_short_filter,
@@ -230,16 +237,8 @@ def print_regime_filter_stats(
     print(f"BULL K线:     {stats.bullish_bars}/{stats.total_bars} ({bull_pct:.2f}%)")
     print(f"BEAR K线:     {stats.bearish_bars}/{stats.total_bars} ({bear_pct:.2f}%)")
     print(f"NEUTRAL K线:  {stats.neutral_bars}/{stats.total_bars} ({neutral_pct:.2f}%)")
-    print(
-        "BULL首尾:     "
-        f"{stats.first_bull_time or '无'}"
-        f" ~ {stats.last_bull_time or '无'}"
-    )
-    print(
-        "BEAR首尾:     "
-        f"{stats.first_bear_time or '无'}"
-        f" ~ {stats.last_bear_time or '无'}"
-    )
+    print(f"BULL首尾:     {stats.first_bull_time or '无'} ~ {stats.last_bull_time or '无'}")
+    print(f"BEAR首尾:     {stats.first_bear_time or '无'} ~ {stats.last_bear_time or '无'}")
     print("过滤规则:      BULL/NEUTRAL 禁空，BEAR 多空都允许")
     print(f"非BEAR屏蔽SHORT信号: {stats.blocked_short_signals}")
     print(f"非BEAR平空触发:      {stats.closed_short_positions}")
@@ -259,12 +258,83 @@ def print_drawdown_guard_stats(stats: DrawdownGuardStats) -> None:
     print(f"熔断K线:       {stats.guarded_bars}/{stats.total_bars} ({pct:.2f}%)")
     print(f"强制平仓:      {stats.forced_closes}")
     print(f"内部最大回撤:  {stats.max_observed_drawdown * 100:.2f}%")
-    print(
-        "熔断首尾:      "
-        f"{stats.first_guard_time or '无'}"
-        f" ~ {stats.last_guard_time or '无'}"
-    )
+    print(f"熔断首尾:      {stats.first_guard_time or '无'} ~ {stats.last_guard_time or '无'}")
     print()
+
+
+def print_market_intel_stats(
+    stats: MarketIntelOverlayStats,
+    baseline_trades: list[dict],
+) -> None:
+    """Print frozen market-intel overlay diagnostics."""
+    print("=" * 60)
+    print("Market Intelligence Overlay（冻结情报表）")
+    print("=" * 60)
+    print(f"K线数:          {stats.total_bars}")
+    for mode, count in stats.mode_counts.items():
+        pct = count / stats.total_bars * 100 if stats.total_bars else 0.0
+        print(f"{mode:18s}: {count:5d} ({pct:5.2f}%)")
+    print(f"拦截新开仓:     {stats.vetoed_new_entries}")
+    print(f"半仓新开仓:     {stats.half_size_entries}")
+    print(f"情报过期K线:    {stats.expired_intel_bars}")
+    print(f"情报缺失K线:    {stats.missing_intel_bars}")
+
+    close_trades = [t for t in baseline_trades if t.get("pnl") is not None]
+    veto_pnls = _entry_pnls(close_trades, stats.vetoed_entry_steps)
+    half_pnls = _entry_pnls(close_trades, stats.half_size_entry_steps)
+    print(f"被拦截交易事后PnL: {_pnl_summary(veto_pnls)}")
+    print(f"半仓交易事后PnL:   {_pnl_summary(half_pnls)}")
+    print()
+
+
+def print_random_control_stats(
+    stats: RandomEntryControlStats,
+    baseline_trades: list[dict],
+) -> None:
+    """Print random entry-control diagnostics."""
+    print("=" * 60)
+    print("Random Veto Control（同等数量随机拦截/半仓）")
+    print("=" * 60)
+    print(f"seed:           {stats.seed}")
+    print(f"可选新开仓数:   {stats.available_entry_count}")
+    print(f"随机拦截新开仓: {stats.vetoed_new_entries}")
+    print(f"随机半仓新开仓: {stats.half_size_entries}")
+
+    close_trades = [t for t in baseline_trades if t.get("pnl") is not None]
+    veto_pnls = _entry_pnls(close_trades, stats.vetoed_entry_steps)
+    half_pnls = _entry_pnls(close_trades, stats.half_size_entry_steps)
+    print(f"随机拦截交易事后PnL: {_pnl_summary(veto_pnls)}")
+    print(f"随机半仓交易事后PnL: {_pnl_summary(half_pnls)}")
+    print()
+
+
+def _entry_pnls(trades: list[dict], entry_steps: tuple[int, ...]) -> list[float]:
+    wanted = set(entry_steps)
+    return [float(t["pnl"]) for t in trades if t.get("entry_step") in wanted]
+
+
+def _pnl_summary(pnls: list[float]) -> str:
+    if not pnls:
+        return "无"
+    return f"n={len(pnls)} avg={np.mean(pnls):+.2f} sum={np.sum(pnls):+.2f} USDT"
+
+
+def build_market_intel_position_sizes(
+    valid_df: pd.DataFrame,
+    valid_signals: np.ndarray,
+    path: str,
+    max_age_hours: float,
+    unknown_mode: str,
+) -> tuple[np.ndarray, MarketIntelOverlayStats]:
+    """Load market-intel file and return per-bar entry multipliers."""
+    _, position_sizes, stats = build_market_intel_overlay(
+        valid_df,
+        load_market_intel(path),
+        signals=valid_signals,
+        max_age_hours=max_age_hours,
+        unknown_mode=unknown_mode,
+    )
+    return position_sizes, stats
 
 
 def main():
@@ -334,6 +404,30 @@ def main():
         default=0.15,
         help="回撤熔断恢复阈值，默认0.15",
     )
+    parser.add_argument("--market-intel", type=str, default=None, help="冻结市场情报表路径")
+    parser.add_argument(
+        "--market-intel-max-age-hours",
+        type=float,
+        default=3.0,
+        help="market-intel 最大有效小时数，默认3",
+    )
+    parser.add_argument(
+        "--market-intel-unknown-mode",
+        type=str,
+        default="cautious",
+        help="情报缺失/过期时使用的 mode，默认 cautious",
+    )
+    parser.add_argument(
+        "--market-intel-random-control",
+        action="store_true",
+        help="启用同等 veto/半仓数量的随机对照",
+    )
+    parser.add_argument(
+        "--market-intel-random-seed",
+        type=int,
+        default=42,
+        help="market-intel 随机对照 seed，默认42",
+    )
     args = parser.parse_args()
 
     # 加载策略参数
@@ -390,7 +484,7 @@ def main():
     print(f"执行回测（{mode_label}，手续费+滑点模拟）...")
     print("=" * 60)
     raw_signals = generate_strategy_signals(strategy, df, enable_short=enable_short)
-    signals = raw_signals
+    signals = raw_signals.copy()
     regime_filter_stats = None
     if args.regime_filter or args.legacy_bull_regime_filter:
         regimes = build_daily_regime_labels(
@@ -418,11 +512,53 @@ def main():
         )
         signals[min_idx:] = valid_signals
 
+    market_intel_stats = None
+    position_sizes = None
+    if args.market_intel:
+        position_sizes, market_intel_stats = build_market_intel_position_sizes(
+            valid_df,
+            valid_signals,
+            args.market_intel,
+            args.market_intel_max_age_hours,
+            args.market_intel_unknown_mode,
+        )
+
     evaluator = StrategyEvaluator(
         initial_capital=INITIAL_CAPITAL, commission=COMMISSION, slippage=SLIPPAGE
     )
     score, metrics, trades = evaluator.evaluate(valid_signals, prices, valid_df)
     n_trades = len([t for t in trades if t.get("pnl") is not None])
+    overlay_score = None
+    overlay_metrics = None
+    overlay_trades = None
+    overlay_n_trades = None
+    random_score = None
+    random_metrics = None
+    random_trades = None
+    random_n_trades = None
+    random_control_stats = None
+    if position_sizes is not None:
+        overlay_score, overlay_metrics, overlay_trades = evaluator.evaluate(
+            valid_signals,
+            prices,
+            valid_df,
+            position_sizes=position_sizes,
+        )
+        overlay_n_trades = len([t for t in overlay_trades if t.get("pnl") is not None])
+        if args.market_intel_random_control and market_intel_stats is not None:
+            random_position_sizes, random_control_stats = build_random_entry_control(
+                valid_signals,
+                veto_count=market_intel_stats.vetoed_new_entries,
+                half_count=market_intel_stats.half_size_entries,
+                seed=args.market_intel_random_seed,
+            )
+            random_score, random_metrics, random_trades = evaluator.evaluate(
+                valid_signals,
+                prices,
+                valid_df,
+                position_sizes=random_position_sizes,
+            )
+            random_n_trades = len([t for t in random_trades if t.get("pnl") is not None])
 
     benchmark_signals = buy_hold_signals(len(valid_signals))
     _, benchmark_metrics, benchmark_trades = evaluator.evaluate(benchmark_signals, prices, valid_df)
@@ -446,6 +582,42 @@ def main():
     print(f"胜率:        {metrics['win_rate'] * 100:.1f}%")
     print(f"交易次数:    {n_trades}")
     print()
+
+    if overlay_metrics is not None:
+        print("=" * 60)
+        print("Overlay 回测结果（同一组信号 + market-intel 仓位倍率）")
+        print("=" * 60)
+        print(f"最终权益:    {INITIAL_CAPITAL * (1 + overlay_metrics['total_return']):.2f} USDT")
+        print(f"综合评分:    {overlay_score:.4f}")
+        print(f"总收益率:    {overlay_metrics['total_return'] * 100:.2f}%")
+        print(f"年化收益率:  {overlay_metrics['annualized_return'] * 100:.2f}%")
+        print(f"年化波动率:  {overlay_metrics['annualized_vol'] * 100:.2f}%")
+        print(f"夏普比率:    {overlay_metrics['sharpe_ratio']:.4f}")
+        print(f"最大回撤:    {overlay_metrics['max_drawdown'] * 100:.2f}%")
+        print(f"胜率:        {overlay_metrics['win_rate'] * 100:.1f}%")
+        print(f"交易次数:    {overlay_n_trades}")
+        print()
+
+    if market_intel_stats is not None:
+        print_market_intel_stats(market_intel_stats, trades)
+
+    if random_metrics is not None:
+        print("=" * 60)
+        print("随机对照回测结果（同一组信号 + 随机仓位倍率）")
+        print("=" * 60)
+        print(f"最终权益:    {INITIAL_CAPITAL * (1 + random_metrics['total_return']):.2f} USDT")
+        print(f"综合评分:    {random_score:.4f}")
+        print(f"总收益率:    {random_metrics['total_return'] * 100:.2f}%")
+        print(f"年化收益率:  {random_metrics['annualized_return'] * 100:.2f}%")
+        print(f"年化波动率:  {random_metrics['annualized_vol'] * 100:.2f}%")
+        print(f"夏普比率:    {random_metrics['sharpe_ratio']:.4f}")
+        print(f"最大回撤:    {random_metrics['max_drawdown'] * 100:.2f}%")
+        print(f"胜率:        {random_metrics['win_rate'] * 100:.1f}%")
+        print(f"交易次数:    {random_n_trades}")
+        print()
+
+    if random_control_stats is not None:
+        print_random_control_stats(random_control_stats, trades)
 
     if regime_filter_stats is not None:
         print_regime_filter_stats(
@@ -489,7 +661,7 @@ def main():
         print(f"  {labels.get(sid, f'未知({sid})'):18s}: {count:5d} 次 ({pct:5.2f}%)")
     print()
 
-    return metrics
+    return overlay_metrics or metrics
 
 
 if __name__ == "__main__":
