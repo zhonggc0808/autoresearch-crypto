@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
+
 from dex.checkpoints import (
     apply_exit_logic_to_strategy_params,
     build_channel_breakout_strategy_from_checkpoint,
     is_regime_channel_breakout_checkpoint,
+    load_checkpoint,
 )
 
 
@@ -113,3 +116,20 @@ def test_regime_specific_profit_lock_overrides_global_profit_lock() -> None:
     assert bear.profit_lock_atr_multiplier == 3.0
     assert bear.profit_lock_atr_period == 14
     assert bear.profit_lock_min_hold_bars == 72
+
+
+def test_load_checkpoint_accepts_nested_candidate_json(tmp_path) -> None:
+    candidate = {
+        "experiment_id": "exp_unit",
+        "status": "research_only",
+        "params": _checkpoint_with_exit_logic(),
+    }
+    path = tmp_path / "candidate.json"
+    path.write_text(json.dumps(candidate), encoding="utf-8")
+
+    checkpoint = load_checkpoint(path)
+
+    assert checkpoint["strategy_type"] == "exit_logic_channel_breakout"
+    assert checkpoint["experiment_id"] == "exp_unit"
+    assert checkpoint["status"] == "research_only"
+    assert is_regime_channel_breakout_checkpoint(checkpoint)
