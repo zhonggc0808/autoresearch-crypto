@@ -76,7 +76,7 @@ transitions.
 
 ---
 
-## 3. Evaluation Framework (from docs/validation_framework.md)
+## 3. Evaluation Framework (from docs/reference/validation_framework.md)
 
 All Phase 3C candidates must pass:
 

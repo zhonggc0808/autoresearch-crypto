@@ -353,7 +353,7 @@ No candidate can be promoted through the full dual-window pipeline until
 
 ## 7. Change Process
 
-This contract is version-controlled in `docs/llm_research_contract.md`. Changes
+This contract is version-controlled in `docs/reference/llm_research_contract.md`. Changes
 require:
 
 1. A proposal in `research_workspace/proposals/` explaining the rationale

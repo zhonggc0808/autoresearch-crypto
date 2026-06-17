@@ -76,10 +76,10 @@ Run: `uv run pytest tests/test_candidate_schema_v02.py tests/test_verdict_engine
 
 ### 9. Documentation
 
-- [ ] `docs/llm_research_org.md` exists and is accurate
-- [ ] `docs/llm_research_runbook.md` exists and commands are tested
-- [ ] `docs/llm_research_release_checklist.md` exists and is complete
-- [ ] `docs/llm_research_contract.md` is up to date
+- [ ] `docs/reference/llm_research_org.md` exists and is accurate
+- [ ] `docs/reference/llm_research_runbook.md` exists and commands are tested
+- [ ] `docs/reference/llm_research_release_checklist.md` exists and is complete
+- [ ] `docs/reference/llm_research_contract.md` is up to date
 - [ ] `tests/known_failures.md` exists and is accurate
 
 ### 10. Verification Script

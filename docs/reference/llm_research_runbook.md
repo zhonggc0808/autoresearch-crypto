@@ -279,7 +279,7 @@ generator. If you see `review_failed` only for non-CB families, check:
 
 ## 7. Adding a New Family
 
-See `docs/llm_research_org.md` §5.3 and `scripts/family_registry.py` for
+See `docs/reference/llm_research_org.md` §5.3 and `scripts/family_registry.py` for
 existing examples. The process:
 
 1. Define `FamilyDefinition` in `family_registry.py`

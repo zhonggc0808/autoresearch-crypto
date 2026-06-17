@@ -31,7 +31,7 @@
 - `dex/strategies/channel_breakout.py`
 - `dex/checkpoints.py`
 - `dex/strategy_signals.py`
-- `docs/STRATEGIES.md`
+- `docs/reference/STRATEGIES.md`
 
 `ChannelBreakoutTrendStrategy` 当前支持：
 
@@ -154,8 +154,8 @@ C:\Users\81094\AppData\Local\Python\pythoncore-3.14-64\Scripts\uv.exe run python
 - `search_results/channel_breakout_candidates_730d.json`
 - `data/crypto/ETHUSDT_5m_365d.parquet`
 - `data/crypto/ETHUSDT_5m_730d.parquet`
-- `docs/2026-06-11-okx-trend-handoff.md`
-- `docs/STRATEGIES.md`
+- `docs/baseline/2026-06-11-okx-trend-handoff.md`
+- `docs/reference/STRATEGIES.md`
 
 不要把 `.env` 直接发到不可信环境。新机器上重新创建 `.env`，只填必要变量：
 

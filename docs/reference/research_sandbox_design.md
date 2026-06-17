@@ -611,7 +611,7 @@ NEUTRAL (N3_dir): entry_lookback=375, min_hold_bars=432, bidirectional,
 
 ### Phase 1 (本轮 — DESIGN ONLY)
 
-- [ ] `docs/research_sandbox_design.md` (本文档)
+- [ ] `docs/reference/research_sandbox_design.md` (本文档)
 - [ ] `research_workspace/README.md`
 - [ ] `program_research.md` 草案
 - [ ] `results.tsv` schema
