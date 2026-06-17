@@ -4,7 +4,7 @@
 
 **Goal:** Implement Phase 0 diagnostic ledger, Phase 1 fixed-size matrix, and Phase 2 simulator infrastructure (DD sizing + adverse stop) as specified in `docs/superpowers/specs/2026-06-17-channel-breakout-position-risk-validation.md`.
 
-**Architecture:** Minimal enhancement to existing `StrategyEvaluator.simulate()` in `dex/strategies/base.py`, a new `enrich_trade_ledger()` in `dex/strategies/trade_ledger.py`, two new research scripts in `scripts/`, and extended tests in `tests/`. Phase 2 `stop_config` is added to `simulate()` as an optional parameter with per-bar stop checking between signal processing and equity computation.
+**Architecture:** Minimal enhancement to existing `StrategyEvaluator.simulate()` in `dex/strategies/base.py`, a new `enrich_trade_ledger()` in `dex/strategies/trade_ledger.py`, two new research scripts in `scripts/`, and extended tests in `tests/`. Phase 2 `stop_config` refactors `simulate()` into the spec-defined per-bar order: mark-to-market → DD update → existing-position exits/stops → then new entries (with entry-bar stop immunity).
 
 **Tech Stack:** Python 3.10+, NumPy, Pandas, pytest. Existing virtualenv at `.venv\Scripts\python.exe`.
 
@@ -19,7 +19,7 @@
 - Squeeze stop Donchian MUST be lagged (shifted by 1)
 - Partial close requires dual ledger (event + logical trade)
 - Final thresholds require Gate 0 review; parameter grids must be pre-registered
-- Ruff line-length=100, import sorting (I) enabled
+- Ruff line-length=100, import sorting (I) enabled. When implementing code snippets from this plan, reformat long dict literals and function calls to satisfy the 100-char limit — the plan snippets are formatted for readability, not ruff compliance.
 
 ---
 
@@ -97,8 +97,9 @@ Expected: all existing tests PASS.
 git add dex/strategies/base.py
 git commit -m "feat: add entry_price/entry_notional to simulate() open events
 ```
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 ```
+```
+(Ponytail note: commit commands simplified to single-line; add Co-Authored-By via commit body if needed.)
 
 ---
 
@@ -252,8 +253,9 @@ Expected: PASS.
 git add dex/strategies/base.py tests/test_evaluator.py
 git commit -m "feat: add entry_price/exit_price/entry_notional to simulate() close events
 ```
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 ```
+```
+(Ponytail note: commit commands simplified to single-line; add Co-Authored-By via commit body if needed.)
 
 ---
 
@@ -612,8 +614,9 @@ Expected: all 6 tests PASS.
 git add dex/strategies/trade_ledger.py tests/test_trade_ledger.py
 git commit -m "feat: add enrich_trade_ledger() for MAE/MFE/duration/regime diagnostics
 ```
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 ```
+```
+(Ponytail note: commit commands simplified to single-line; add Co-Authored-By via commit body if needed.)
 
 ---
 
@@ -646,10 +649,7 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import os
-import subprocess
-import sys
 from datetime import datetime
 
 import numpy as np
@@ -684,7 +684,8 @@ def main() -> None:
 
     prices = df_oos["close"].to_numpy(dtype=float)
 
-    # Generate signals from checkpoint (delegate to backtest_quant.py data flow)
+    # Generate signals: hardcoded params reproduce v2 naked 375/432.
+    # Does NOT load a .pt checkpoint — params match the checkpoint exactly.
     from dex.strategies.channel_breakout import ChannelBreakoutTrendStrategy
 
     strategy = ChannelBreakoutTrendStrategy(
@@ -718,15 +719,20 @@ def main() -> None:
     print(f"Ledger saved: {ledger_path} ({len(closed_trades)} closed trades)")
 
     # Compute diagnostic report
-    report = generate_report(closed_trades, ledger_df)
+    report = generate_report(closed_trades, df_oos)
     report_path = os.path.join(OUTPUT_DIR, f"{OUTPUT_PREFIX}_mae_mfe_report.md")
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(report)
     print(f"Report saved: {report_path}")
 
 
-def generate_report(trades: list[dict], df: pd.DataFrame) -> str:
-    """Generate Gate 0 diagnostic report."""
+def generate_report(trades: list[dict], price_df: pd.DataFrame) -> str:
+    """Generate Gate 0 diagnostic report.
+    
+    Args:
+        trades: List of closed trade dicts from enrich_trade_ledger().
+        price_df: OHLCV DataFrame (same as df_oos) for per-bar path analysis.
+    """
     pnls = np.array([t["pnl"] for t in trades])
     total_trades = len(trades)
 
@@ -795,7 +801,7 @@ def generate_report(trades: list[dict], df: pd.DataFrame) -> str:
 
     # Question 5: Time-in-loss horizon analysis
     lines.append("## Q5: Horizon Unrealized PnL")
-    close_arr = df_oos["close"].to_numpy(dtype=float)
+    close_arr = price_df["close"].to_numpy(dtype=float)
     for hours in [48, 72, 96]:
         horizon_bars = int(hours * 60 / TIMEFRAME_MINUTES)
         lines.append(f"\n### {hours}h horizon ({horizon_bars} bars)")
@@ -836,7 +842,7 @@ def generate_report(trades: list[dict], df: pd.DataFrame) -> str:
     lines.append("\n## Q6: Break-Even Stop — Killed Big Winners")
     for trigger in [0.03, 0.04]:
         for stop_level in [0.0, 0.005]:
-            killed = _count_be_killed(big_winners, trigger, stop_level, df_oos)
+            killed = _count_be_killed(big_winners, trigger, stop_level, price_df)
             pct = killed / len(big_winners) * 100 if big_winners else 0
             lines.append(f"- BE trigger +{trigger:.0%}, stop {stop_level:.1%}: "
                           f"killed {killed}/{len(big_winners)} ({pct:.1f}%)")
@@ -867,7 +873,7 @@ def generate_report(trades: list[dict], df: pd.DataFrame) -> str:
     ) if big_winners else 0
     med_tmae_h = np.median(tmae_hours) if tmae_hours else 0
     be_kill_pct = (
-        _count_be_killed(big_winners, 0.03, 0.0, df_oos) / len(big_winners) * 100
+        _count_be_killed(big_winners, 0.03, 0.0, price_df) / len(big_winners) * 100
     ) if big_winners else 0
 
     lines.append(f"- Big winners with MAE worse than -5%: {big_winner_mae5_pct:.1f}%")
@@ -951,8 +957,9 @@ Expected: `import OK` (script file exists, imports resolve).
 git add scripts/diagnose_mae_mfe.py
 git commit -m "feat: add Phase 0 MAE/MFE diagnostic script
 ```
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 ```
+```
+(Ponytail note: commit commands simplified to single-line; add Co-Authored-By via commit body if needed.)
 
 ---
 
@@ -963,7 +970,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 
 **Interfaces:**
 - Consumes: `StrategyEvaluator.simulate()` with `position_sizes`
-- Consumes: Checkpoint `channel_breakout_375_432.pt` for signals
+- Signal source: `ChannelBreakoutTrendStrategy(entry_lookback=375, min_hold_bars=432)` — hardcoded params reproduce v2 naked signal. No .pt checkpoint loading.
 - Produces: CSV matrix + Markdown baseline report in `research_workspace/diagnostics/`
 
 - [ ] **Step 1: Write the matrix script**
@@ -1125,8 +1132,9 @@ Expected: `import OK`.
 git add scripts/run_fixed_size_matrix.py
 git commit -m "feat: add Phase 1 fixed position size matrix script
 ```
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 ```
+```
+(Ponytail note: commit commands simplified to single-line; add Co-Authored-By via commit body if needed.)
 
 ---
 
@@ -1240,7 +1248,7 @@ def test_stop_config_base_size_only_position_source() -> None:
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```powershell
-.venv\Scripts\python.exe -m pytest tests\test_evaluator.py::test_stop_config_new_entry_immune_on_same_bar tests\test_evaluator.py::test_stop_config_base_size_only_position_source -v
+.venv\Scripts\python.exe -m pytest tests\test_evaluator.py::test_stop_cannot_fire_on_entry_bar tests\test_evaluator.py::test_stop_can_fire_on_entry_step_plus_one tests\test_evaluator.py::test_stop_config_base_size_only_position_source -v
 ```
 Expected: FAIL (stop_config parameter not yet accepted).
 
@@ -1328,8 +1336,9 @@ Expected: all tests PASS (skeleton is no-op, doesn't break anything).
 git add dex/strategies/base.py tests/test_evaluator.py
 git commit -m "feat: add stop_config parameter and per-bar stop check skeleton to simulate()
 ```
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 ```
+```
+(Ponytail note: commit commands simplified to single-line; add Co-Authored-By via commit body if needed.)
 
 ---
 
@@ -1399,7 +1408,7 @@ def test_no_new_entry_blocks_entries_but_allows_close() -> None:
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```powershell
-.venv\Scripts\python.exe -m pytest tests\test_evaluator.py::test_equity_dd_sizing_reduces_entry_after_drawdown tests\test_evaluator.py::test_equity_dd_kill_switch_closes_position tests\test_evaluator.py::test_no_new_entry_blocks_entries_but_allows_close -v
+.venv\Scripts\python.exe -m pytest tests\test_evaluator.py::test_equity_dd_sizing_reduces_entry_after_drawdown tests\test_evaluator.py::test_no_new_entry_blocks_entries_but_allows_close -v
 ```
 Expected: FAIL (DD sizing not yet implemented).
 
@@ -1485,8 +1494,9 @@ Expected: DD sizing tests PASS.
 git add dex/strategies/base.py tests/test_evaluator.py
 git commit -m "feat: implement equity DD sizing with kill_switch and no_new_entry
 ```
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 ```
+```
+(Ponytail note: commit commands simplified to single-line; add Co-Authored-By via commit body if needed.)
 
 ---
 
@@ -1646,8 +1656,9 @@ Expected: adverse stop tests PASS.
 git add dex/strategies/base.py tests/test_evaluator.py
 git commit -m "feat: implement adverse move partial stop
 ```
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 ```
+```
+(Ponytail note: commit commands simplified to single-line; add Co-Authored-By via commit body if needed.)
 
 ---
 
@@ -1797,8 +1808,9 @@ Expected: all tests PASS.
 git add dex/strategies/trade_ledger.py tests/test_trade_ledger.py
 git commit -m "feat: add build_logical_trade_ledger() for Phase 2 dual ledger
 ```
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 ```
+```
+(Ponytail note: commit commands simplified to single-line; add Co-Authored-By via commit body if needed.)
 
 ---
 
@@ -1849,24 +1861,23 @@ def test_equity_dd_kill_switch_closes_position() -> None:
 ```
 Expected: FAIL (kill_switch close not yet implemented).
 
-- [ ] **Step 1: Implement kill_switch close execution**
+- [ ] **Step 3: Implement kill_switch close execution**
 
-In the main loop of `simulate()`, after DD update and before signal processing, add kill_switch close logic that mirrors the existing close-long / close-short code but records `exit_reason` and `is_partial=False`.
+In the main loop of `simulate()`, after DD update (per-bar step 3a in B1 order), add kill_switch close logic that mirrors the existing close-long / close-short code but records `exit_reason="kill_switch"` and `is_partial=False`.
 
-- [ ] **Step 2: Run DD kill_switch test**
+- [ ] **Step 4: Run DD kill_switch test**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests\test_evaluator.py::test_equity_dd_kill_switch_closes_position -v
 ```
 Expected: PASS.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add dex/strategies/base.py
-git commit -m "feat: wire kill_switch close execution in simulate()
+git commit -m "feat: wire kill_switch close execution in simulate()"
 ```
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 ```
 
 ---
@@ -1927,8 +1938,9 @@ Expected: PASS.
 git add tests/test_evaluator.py
 git commit -m "test: add invariant test for entry-bar stop immunity
 ```
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 ```
+```
+(Ponytail note: commit commands simplified to single-line; add Co-Authored-By via commit body if needed.)
 
 ---
 
@@ -1983,7 +1995,7 @@ def test_invariant_at_most_one_risk_close_per_bar() -> None:
 - [ ] **Step 2: Run invariant test**
 
 ```powershell
-.venv\Scripts\python.exe -m pytest tests\test_evaluator.py::test_invariant_at_most_one_risk_action_per_bar -v
+.venv\Scripts\python.exe -m pytest tests\test_evaluator.py::test_invariant_at_most_one_risk_close_per_bar -v
 ```
 Expected: PASS.
 
@@ -1993,8 +2005,9 @@ Expected: PASS.
 git add tests/test_evaluator.py
 git commit -m "test: add invariant test for single risk action per bar
 ```
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 ```
+```
+(Ponytail note: commit commands simplified to single-line; add Co-Authored-By via commit body if needed.)
 
 ---
 
@@ -2051,8 +2064,9 @@ Expected: PASS.
 git add tests/test_evaluator.py
 git commit -m "test: add invariant test for dual ledger PnL reconciliation
 ```
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 ```
+```
+(Ponytail note: commit commands simplified to single-line; add Co-Authored-By via commit body if needed.)
 
 ---
 
@@ -2078,8 +2092,9 @@ Expected: no errors.
 git add -A
 git commit -m "chore: final invariant tests and lint for Phase 2 infrastructure
 ```
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"""
 ```
+```
+(Ponytail note: commit commands simplified to single-line; add Co-Authored-By via commit body if needed.)
 
 ---
 
