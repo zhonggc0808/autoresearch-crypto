@@ -1,12 +1,14 @@
 # Fixed Size Matrix - Baseline Selection
 
-Generated: 2026-06-17T22:25:00.277402
+Generated: 2026-06-17T23:29:05.957497
 Checkpoint: checkpoints/channel_breakout_375_432.pt
 Data: data\crypto\ETHUSDT_5m_2600d.parquet
 OOS: 2024-06-06 14:25:00 to 2026-06-12 02:55:00
-Git commit: 97ec821
+Git commit: 845a3f4
+Script version: 2026-06-17.fixed_size.v2
 Fee/slippage: commission=0.0002, slippage=0.0002
 MC simulations: 2000
+MC block bars: 288
 
 | Size | Return | MaxDD | Sharpe | Trades | MC DD<-30% | MC loss |
 |---:|---:|---:|---:|---:|---:|---:|

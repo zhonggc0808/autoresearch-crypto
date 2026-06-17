@@ -52,6 +52,7 @@ results.tsv
 uv.lock
 run.log
 *.log
+.pytest_tmp/
 
 # Data artifacts in docs
 docs/*.csv
