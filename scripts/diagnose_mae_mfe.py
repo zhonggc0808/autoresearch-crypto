@@ -26,6 +26,7 @@ OOS_END = "2026-06-12 02:55:00"
 OUTPUT_DIR = Path("research_workspace/diagnostics")
 OUTPUT_PREFIX = "channel_breakout_375_432_v2_oos_2600d"
 TIMEFRAME_MINUTES = 5
+SCRIPT_VERSION = "2026-06-17.mae_mfe.v2"
 
 
 def main() -> None:
@@ -38,6 +39,9 @@ def main() -> None:
     evaluator = StrategyEvaluator()
     _, trades = evaluator.simulate(signals, prices, df_oos)
     ledger = enrich_trade_ledger(trades, df_oos, timeframe_minutes=TIMEFRAME_MINUTES)
+    metadata = _run_metadata()
+    for row in ledger:
+        row.update(metadata)
 
     ledger_path = OUTPUT_DIR / f"{OUTPUT_PREFIX}_mae_mfe_ledger.csv"
     pd.DataFrame(ledger).to_csv(ledger_path, index=False)
@@ -87,6 +91,7 @@ def generate_report(trades: list[dict], price_df: pd.DataFrame) -> str:
         f"Data: {DATA_FILE}",
         f"OOS: {OOS_START} to {OOS_END}",
         f"Git commit: {_git_commit()}",
+        f"Script version: {SCRIPT_VERSION}",
         f"Fee/slippage: commission={COMMISSION}, slippage={SLIPPAGE}",
         f"Closed trades: {len(trades)}",
         "",
@@ -227,6 +232,19 @@ def _return_at(side: str, entry_price: float, price: float) -> float:
 
 def _share(trades: list[dict], predicate) -> float:
     return sum(1 for trade in trades if predicate(trade)) / len(trades) if trades else 0.0
+
+
+def _run_metadata() -> dict[str, str | float]:
+    return {
+        "git_commit": _git_commit(),
+        "checkpoint": CHECKPOINT,
+        "data_file": str(DATA_FILE),
+        "oos_start": OOS_START,
+        "oos_end": OOS_END,
+        "commission": COMMISSION,
+        "slippage": SLIPPAGE,
+        "script_version": SCRIPT_VERSION,
+    }
 
 
 def _git_commit() -> str:

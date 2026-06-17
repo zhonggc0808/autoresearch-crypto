@@ -27,6 +27,7 @@ OUTPUT_DIR = Path("research_workspace/diagnostics")
 OUTPUT_PREFIX = "channel_breakout_375_432_v2_oos_2600d"
 SIZES = [1.0, 0.50, 0.475, 0.45, 0.425, 0.40]
 BLOCK_BARS = 288
+SCRIPT_VERSION = "2026-06-17.fixed_size.v2"
 
 
 def main() -> None:
@@ -106,6 +107,8 @@ def _run_size(
         "oos_end": OOS_END,
         "commission": COMMISSION,
         "slippage": SLIPPAGE,
+        "mc_block_bars": BLOCK_BARS,
+        "script_version": SCRIPT_VERSION,
     }
     row.update(_monte_carlo(equity, mc_sims, mc_seed))
     return row
@@ -121,8 +124,10 @@ def _baseline_report(results: list[dict], mc_sims: int) -> str:
         f"Data: {DATA_FILE}",
         f"OOS: {OOS_START} to {OOS_END}",
         f"Git commit: {_git_commit()}",
+        f"Script version: {SCRIPT_VERSION}",
         f"Fee/slippage: commission={COMMISSION}, slippage={SLIPPAGE}",
         f"MC simulations: {mc_sims}",
+        f"MC block bars: {BLOCK_BARS}",
         "",
         "| Size | Return | MaxDD | Sharpe | Trades | MC DD<-30% | MC loss |",
         "|---:|---:|---:|---:|---:|---:|---:|",

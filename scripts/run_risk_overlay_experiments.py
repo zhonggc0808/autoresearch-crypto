@@ -62,7 +62,10 @@ def main() -> None:
     pd.DataFrame(_public_rows(stage_c)).to_csv(stage_c_path, index=False)
 
     final_path = OUTPUT_DIR / f"{OUTPUT_PREFIX}_risk_overlay_final.md"
-    final_path.write_text(_final_report(stage_a, stage_b, stage_c, args.mc_sims), encoding="utf-8")
+    final_path.write_text(
+        _final_report(stage_a, stage_b, stage_c, args.mc_sims, args.mc_seed),
+        encoding="utf-8",
+    )
 
     for path in [stage_a_path, stage_b_path, stage_c_path, final_path]:
         print(f"Wrote {path}")
@@ -384,7 +387,13 @@ def _add_lagged_donchian(df: pd.DataFrame) -> None:
     df["donchian_upper_lagged"] = df["donchian_upper_lagged"].ffill()
 
 
-def _final_report(stage_a: list[dict], stage_b: list[dict], stage_c: list[dict], mc_sims: int) -> str:
+def _final_report(
+    stage_a: list[dict],
+    stage_b: list[dict],
+    stage_c: list[dict],
+    mc_sims: int,
+    mc_seed: int,
+) -> str:
     lines = [
         "# Risk Overlay Final Report",
         "",
@@ -393,7 +402,11 @@ def _final_report(stage_a: list[dict], stage_b: list[dict], stage_c: list[dict],
         f"Data: {DATA_FILE}",
         f"OOS: {OOS_START} to {OOS_END}",
         f"Git commit: {_git_commit()}",
+        f"Script version: {SCRIPT_VERSION}",
+        f"Fee/slippage: commission={COMMISSION}, slippage={SLIPPAGE}",
         f"MC simulations: {mc_sims}",
+        f"MC seed: {mc_seed}",
+        f"MC block bars: {BLOCK_BARS}",
         "",
         f"Stage A rows: {len(stage_a)}",
         f"Stage B rows: {len(stage_b)}",
