@@ -37,6 +37,24 @@ def _ema(series: np.ndarray, window: int) -> np.ndarray:
     return ema.astype(np.float32)
 
 
+def _df_value(df: pd.DataFrame, column: str, step: int) -> float | None:
+    if column not in df.columns or not 0 <= step < len(df):
+        return None
+    value = float(df[column].iloc[step])
+    return value if np.isfinite(value) else None
+
+
+def _lagged_channel_upper(df: pd.DataFrame, step: int, config: Dict[str, Any]) -> float | None:
+    for column in ("donchian_upper_lagged", "channel_upper_lagged"):
+        value = _df_value(df, column, step)
+        if value is not None:
+            return value
+    if "donchian_upper" not in df.columns:
+        return None
+    source_step = step - 1 if config.get("channel_upper_lagged", True) else step
+    return _df_value(df, "donchian_upper", source_step)
+
+
 class BaseStrategy(ABC):
     """Abstract base class for all trading strategies.
 
@@ -94,6 +112,8 @@ class StrategyEvaluator:
         signals: np.ndarray,
         prices: np.ndarray,
         df: pd.DataFrame | None = None,
+        position_sizes: np.ndarray | None = None,
+        stop_config: Dict[str, Any] | None = None,
     ) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
         """Simulate trading using signal and price arrays.
 
@@ -103,12 +123,31 @@ class StrategyEvaluator:
             signals: Integer array of trading signals (0-3).
             prices: Array of close prices matching signal length.
             df: Optional DataFrame (unused; kept for API compatibility).
+            position_sizes: Optional per-bar entry size multipliers in [0, 1].
+            stop_config: Optional Phase 2 risk overlay config.
 
         Returns:
             A tuple ``(equity_curve, trades)`` where ``equity_curve`` is a
             1-D array of account equity at each step and ``trades`` is a list
             of trade event dicts.
         """
+        if len(signals) != len(prices):
+            raise ValueError("signals and prices must have the same length")
+        if stop_config is not None:
+            return self._simulate_with_stop_config(signals, prices, df, position_sizes, stop_config)
+        if position_sizes is None:
+            size_multipliers = np.ones(len(signals), dtype=float)
+        else:
+            size_multipliers = np.asarray(position_sizes, dtype=float)
+            if len(size_multipliers) != len(signals):
+                raise ValueError("position_sizes must match signals and prices length")
+            if (
+                not np.all(np.isfinite(size_multipliers))
+                or np.any(size_multipliers < 0)
+                or np.any(size_multipliers > 1)
+            ):
+                raise ValueError("position_sizes must be finite values in [0, 1]")
+
         capital = self.initial_capital
         shares = 0.0  # positive = long, negative = short
         position = 0  # 1 = long, -1 = short, 0 = flat
@@ -116,10 +155,13 @@ class StrategyEvaluator:
         trades: List[Dict[str, Any]] = []
         entry_cost_basis = 0.0
         entry_price = 0.0
+        entry_step = -1
+        entry_size_multiplier = 0.0
 
         for i in range(len(signals)):
             signal = signals[i]
             price = prices[i]
+            size_multiplier = float(size_multipliers[i])
 
             # Resolve signal to target position
             if signal == 2:
@@ -137,9 +179,21 @@ class StrategyEvaluator:
                     exec_price = price * (1 - self.slippage)
                     gross = shares * exec_price
                     cost = gross * self.commission
-                    capital = gross - cost
-                    pnl = capital - entry_cost_basis
-                    trades.append({"type": "sell", "step": i, "pnl": float(pnl)})
+                    proceeds = gross - cost
+                    capital += proceeds
+                    pnl = proceeds - entry_cost_basis
+                    trades.append(
+                        {
+                            "type": "sell",
+                            "step": i,
+                            "entry_step": entry_step,
+                            "entry_size": entry_size_multiplier,
+                            "pnl": float(pnl),
+                            "entry_price": float(entry_price),
+                            "exit_price": float(exec_price),
+                            "entry_notional": float(entry_cost_basis),
+                        }
+                    )
                     shares = 0.0
                     position = 0
 
@@ -153,28 +207,61 @@ class StrategyEvaluator:
                     # Guard: prevent negative capital
                     if capital < 0:
                         capital = 0
-                    trades.append({"type": "buy_cover", "step": i, "pnl": float(pnl)})
+                    trades.append(
+                        {
+                            "type": "buy_cover",
+                            "step": i,
+                            "entry_step": entry_step,
+                            "entry_size": entry_size_multiplier,
+                            "pnl": float(pnl),
+                            "entry_price": float(entry_price),
+                            "exit_price": float(exec_price),
+                            "entry_notional": float(entry_cost_basis),
+                        }
+                    )
                     shares = 0.0
                     position = 0
 
                 # Open new long (skip if insufficient capital)
-                if target_pos == 1 and position == 0 and capital > 0:
+                if target_pos == 1 and position == 0 and capital > 0 and size_multiplier > 0:
+                    deploy = capital * size_multiplier
                     exec_price = price * (1 + self.slippage)
-                    shares = capital * (1 - self.commission) / exec_price
-                    entry_cost_basis = capital
+                    shares = deploy * (1 - self.commission) / exec_price
+                    entry_cost_basis = deploy
                     entry_price = exec_price
-                    capital = 0.0
-                    trades.append({"type": "buy", "step": i})
+                    capital -= deploy
+                    entry_step = i
+                    entry_size_multiplier = size_multiplier
+                    trades.append(
+                        {
+                            "type": "buy",
+                            "step": i,
+                            "entry_size": entry_size_multiplier,
+                            "entry_price": float(entry_price),
+                            "entry_notional": float(deploy),
+                        }
+                    )
                     position = 1
 
                 # Open new short
-                elif target_pos == -1 and position == 0 and capital > 0:
+                elif target_pos == -1 and position == 0 and capital > 0 and size_multiplier > 0:
+                    deploy = capital * size_multiplier
                     exec_price = price * (1 - self.slippage)
-                    shares = -(capital * (1 - self.commission) / exec_price)
-                    entry_cost_basis = capital
+                    shares = -(deploy * (1 - self.commission) / exec_price)
+                    entry_cost_basis = deploy
                     entry_price = exec_price
-                    capital = capital * (1 - self.commission)
-                    trades.append({"type": "sell_short", "step": i})
+                    capital -= deploy * self.commission
+                    entry_step = i
+                    entry_size_multiplier = size_multiplier
+                    trades.append(
+                        {
+                            "type": "sell_short",
+                            "step": i,
+                            "entry_size": entry_size_multiplier,
+                            "entry_price": float(entry_price),
+                            "entry_notional": float(deploy),
+                        }
+                    )
                     position = -1
 
             # Compute current equity
@@ -196,16 +283,371 @@ class StrategyEvaluator:
             exec_price = prices[-1] * (1 - self.slippage)
             gross = shares * exec_price
             cost = gross * self.commission
-            capital = gross - cost
-            pnl = capital - entry_cost_basis
-            trades.append({"type": "sell_final", "step": len(signals) - 1, "pnl": float(pnl)})
+            proceeds = gross - cost
+            capital += proceeds
+            pnl = proceeds - entry_cost_basis
+            trades.append(
+                {
+                    "type": "sell_final",
+                    "step": len(signals) - 1,
+                    "entry_step": entry_step,
+                    "entry_size": entry_size_multiplier,
+                    "pnl": float(pnl),
+                    "entry_price": float(entry_price),
+                    "exit_price": float(exec_price),
+                    "entry_notional": float(entry_cost_basis),
+                }
+            )
             equity[-1] = capital
         elif position == -1:
             exec_price = prices[-1] * (1 + self.slippage)
             buy_cost = abs(shares) * exec_price * (1 + self.commission)
             pnl = entry_cost_basis - buy_cost
             capital = capital + pnl
-            trades.append({"type": "buy_cover_final", "step": len(signals) - 1, "pnl": float(pnl)})
+            trades.append(
+                {
+                    "type": "buy_cover_final",
+                    "step": len(signals) - 1,
+                    "entry_step": entry_step,
+                    "entry_size": entry_size_multiplier,
+                    "pnl": float(pnl),
+                    "entry_price": float(entry_price),
+                    "exit_price": float(exec_price),
+                    "entry_notional": float(entry_cost_basis),
+                }
+            )
+            equity[-1] = capital
+
+        return np.array(equity), trades
+
+    def _simulate_with_stop_config(
+        self,
+        signals: np.ndarray,
+        prices: np.ndarray,
+        df: pd.DataFrame | None,
+        position_sizes: np.ndarray | None,
+        stop_config: Dict[str, Any],
+    ) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
+        if position_sizes is not None:
+            sizes = np.asarray(position_sizes, dtype=float)
+            if len(sizes) != len(signals):
+                raise ValueError("position_sizes must match signals and prices length")
+            if not np.allclose(sizes, 1.0):
+                raise ValueError("stop_config.base_size is the only Phase 2 position source")
+
+        base_size = float(stop_config.get("base_size", 1.0))
+        if not np.isfinite(base_size) or base_size < 0 or base_size > 1:
+            raise ValueError("stop_config.base_size must be finite and in [0, 1]")
+
+        capital = self.initial_capital
+        shares = 0.0
+        position = 0
+        equity: List[float] = []
+        trades: List[Dict[str, Any]] = []
+        entry_cost_basis = 0.0
+        original_entry_notional = 0.0
+        entry_price = 0.0
+        entry_step = -1
+        entry_size_multiplier = 0.0
+        parent_trade_id = -1
+        remaining_fraction = 0.0
+        adverse_reduced = False
+        time_loss_fired: set[int] = set()
+        break_even_fired = False
+        mfe_since_entry = 0.0
+        trade_id = 0
+        peak_equity = self.initial_capital
+
+        def mark_equity(price: float) -> float:
+            if position == 1:
+                return capital + shares * price
+            if position == -1:
+                return capital + abs(shares) * (entry_price - price)
+            return capital
+
+        def target_from_signal(signal: int) -> int:
+            if signal == 2:
+                return 1
+            if signal == 3:
+                return -1
+            if signal == 0:
+                return 0
+            return position
+
+        def dd_entry_size(dd_abs: float) -> float:
+            dd_config = stop_config.get("equity_dd_sizing", {})
+            if not dd_config.get("enabled", False):
+                return base_size
+            multiplier = 1.0
+            for upper, tier_multiplier in sorted(dd_config.get("tiers", [])):
+                multiplier = float(tier_multiplier)
+                if dd_abs < float(upper):
+                    break
+            return base_size * multiplier
+
+        def dd_blocks(dd_abs: float) -> tuple[bool, bool]:
+            dd_config = stop_config.get("equity_dd_sizing", {})
+            if not dd_config.get("enabled", False):
+                return False, False
+            no_new = dd_abs >= float(dd_config.get("no_new_entry_dd", 1.0))
+            kill = dd_abs >= float(dd_config.get("kill_switch_dd", 1.0))
+            return no_new, kill
+
+        def next_trade_id() -> int:
+            nonlocal trade_id
+            trade_id += 1
+            return trade_id
+
+        def open_position(target_pos: int, i: int, price: float, size_multiplier: float) -> None:
+            nonlocal adverse_reduced, break_even_fired, capital, entry_cost_basis, entry_price
+            nonlocal entry_size_multiplier, mfe_since_entry
+            nonlocal entry_step, original_entry_notional, parent_trade_id, position
+            nonlocal remaining_fraction, shares
+
+            if capital <= 0 or size_multiplier <= 0:
+                return
+            deploy = capital * size_multiplier
+            tid = next_trade_id()
+            if target_pos == 1:
+                exec_price = price * (1 + self.slippage)
+                shares = deploy * (1 - self.commission) / exec_price
+                capital -= deploy
+                event_type = "buy"
+            else:
+                exec_price = price * (1 - self.slippage)
+                shares = -(deploy * (1 - self.commission) / exec_price)
+                capital -= deploy * self.commission
+                event_type = "sell_short"
+            entry_cost_basis = deploy
+            original_entry_notional = deploy
+            entry_price = exec_price
+            entry_step = i
+            entry_size_multiplier = size_multiplier
+            parent_trade_id = tid
+            remaining_fraction = 1.0
+            adverse_reduced = False
+            break_even_fired = False
+            mfe_since_entry = 0.0
+            time_loss_fired.clear()
+            position = target_pos
+            trades.append(
+                {
+                    "type": event_type,
+                    "step": i,
+                    "entry_size": entry_size_multiplier,
+                    "entry_price": float(entry_price),
+                    "entry_notional": float(deploy),
+                    "trade_id": tid,
+                    "parent_trade_id": tid,
+                }
+            )
+
+        def close_position(
+            i: int,
+            price: float,
+            reason: str,
+            fraction: float = 1.0,
+            final: bool = False,
+        ) -> None:
+            nonlocal adverse_reduced, break_even_fired, capital, entry_cost_basis, entry_price
+            nonlocal entry_size_multiplier, mfe_since_entry
+            nonlocal entry_step, original_entry_notional, parent_trade_id, position
+            nonlocal remaining_fraction, shares
+
+            if position == 0 or fraction <= 0:
+                return
+            fraction = min(1.0, fraction)
+            closed_fraction = remaining_fraction * fraction
+            new_remaining = max(0.0, remaining_fraction - closed_fraction)
+            if position == 1:
+                exec_price = price * (1 - self.slippage)
+                close_shares = shares * fraction
+                gross = close_shares * exec_price
+                proceeds = gross - gross * self.commission
+                cost_basis_closed = entry_cost_basis * fraction
+                pnl = proceeds - cost_basis_closed
+                capital += proceeds
+                shares -= close_shares
+                event_type = "sell_final" if final else "sell"
+            else:
+                exec_price = price * (1 + self.slippage)
+                close_shares = abs(shares) * fraction
+                buy_cost = close_shares * exec_price * (1 + self.commission)
+                cost_basis_closed = entry_cost_basis * fraction
+                pnl = cost_basis_closed - buy_cost
+                capital += pnl
+                shares += close_shares
+                event_type = "buy_cover_final" if final else "buy_cover"
+            if capital < 0:
+                capital = 0.0
+            entry_cost_basis -= cost_basis_closed
+            logical_closed = new_remaining <= 1e-12 or abs(shares) <= 1e-12
+            trades.append(
+                {
+                    "type": event_type,
+                    "step": i,
+                    "entry_step": entry_step,
+                    "entry_size": entry_size_multiplier,
+                    "pnl": float(pnl),
+                    "entry_price": float(entry_price),
+                    "exit_price": float(exec_price),
+                    "entry_notional": float(original_entry_notional),
+                    "trade_id": next_trade_id(),
+                    "parent_trade_id": parent_trade_id,
+                    "is_partial": not logical_closed,
+                    "exit_reason": reason,
+                    "closed_fraction": float(closed_fraction),
+                    "remaining_fraction": float(0.0 if logical_closed else new_remaining),
+                    "logical_trade_closed": logical_closed,
+                }
+            )
+            remaining_fraction = new_remaining
+            if logical_closed:
+                shares = 0.0
+                position = 0
+                entry_cost_basis = 0.0
+                original_entry_notional = 0.0
+                entry_price = 0.0
+                entry_step = -1
+                entry_size_multiplier = 0.0
+                parent_trade_id = -1
+                remaining_fraction = 0.0
+                adverse_reduced = False
+                break_even_fired = False
+                mfe_since_entry = 0.0
+                time_loss_fired.clear()
+
+        def unrealized_return(price: float) -> float:
+            return price / entry_price - 1.0 if position == 1 else 1.0 - price / entry_price
+
+        def update_mfe(i: int, price: float) -> None:
+            nonlocal mfe_since_entry
+            if i <= entry_step:
+                return
+            high_value = _df_value(df, "high", i) if df is not None else None
+            low_value = _df_value(df, "low", i) if df is not None else None
+            if position == 1:
+                favorable_price = high_value if high_value is not None else price
+                mfe_since_entry = max(mfe_since_entry, favorable_price / entry_price - 1.0)
+            elif position == -1:
+                favorable_price = low_value if low_value is not None else price
+                mfe_since_entry = max(mfe_since_entry, 1.0 - favorable_price / entry_price)
+
+        def maybe_risk_stop(i: int, price: float) -> bool:
+            nonlocal adverse_reduced, break_even_fired
+            if i <= entry_step:
+                return False
+            unrealized = unrealized_return(price)
+            actions: list[tuple[int, str, str, float, int | None]] = []
+
+            config = stop_config.get("adverse_stop", {})
+            if config.get("enabled", False) and unrealized <= float(
+                config.get("threshold_pct", -0.05)
+            ):
+                action = str(config.get("action", "reduce_half"))
+                if action == "close" or adverse_reduced:
+                    actions.append((0, "close", "adverse_stop", 1.0, None))
+                elif action == "reduce_quarter":
+                    actions.append((2, "reduce_quarter", "adverse_stop", 0.25, None))
+                else:
+                    actions.append((1, "reduce_half", "adverse_stop", 0.5, None))
+
+            time_config = stop_config.get("time_in_loss_stop", {})
+            if time_config.get("enabled", False):
+                bars_since_entry = i - entry_step
+                for tier_index, tier in enumerate(time_config.get("tiers", [])):
+                    if tier_index in time_loss_fired:
+                        continue
+                    bars, threshold, action = tier
+                    if bars_since_entry < int(bars) or unrealized > float(threshold):
+                        continue
+                    action = str(action)
+                    if action == "close":
+                        actions.append((0, "close", "time_in_loss_stop", 1.0, tier_index))
+                    elif action == "reduce_quarter":
+                        actions.append((2, "reduce_quarter", "time_in_loss_stop", 0.25, tier_index))
+                    else:
+                        actions.append((1, "reduce_half", "time_in_loss_stop", 0.5, tier_index))
+
+            squeeze_config = stop_config.get("squeeze_stop", {})
+            if squeeze_config.get("enabled", False) and position == -1 and df is not None:
+                atr_value = _df_value(df, "atr", i)
+                high_value = _df_value(df, "high", i)
+                if atr_value is not None and high_value is not None:
+                    atr_multiple = float(squeeze_config.get("atr_multiple", 2.5))
+                    squeeze_move = high_value - entry_price > atr_multiple * atr_value
+                    channel_ok = True
+                    if squeeze_config.get("require_channel_break", True):
+                        upper = _lagged_channel_upper(df, i, squeeze_config)
+                        channel_ok = upper is not None and price > upper
+                    if squeeze_move and channel_ok:
+                        action = str(squeeze_config.get("action", "reduce_half"))
+                        if action == "close":
+                            actions.append((0, "close", "squeeze_stop", 1.0, None))
+                        elif action == "reduce_quarter":
+                            actions.append((2, "reduce_quarter", "squeeze_stop", 0.25, None))
+                        else:
+                            actions.append((1, "reduce_half", "squeeze_stop", 0.5, None))
+
+            be_config = stop_config.get("break_even_stop", {})
+            if be_config.get("enabled", False) and not break_even_fired:
+                trigger_mfe = float(be_config.get("trigger_mfe_pct", 0.03))
+                stop_level = float(be_config.get("stop_level_pct", 0.0))
+                if mfe_since_entry >= trigger_mfe and unrealized <= stop_level:
+                    action = str(be_config.get("action", "reduce_half"))
+                    if action == "close":
+                        actions.append((0, "close", "break_even_stop", 1.0, None))
+                    elif action == "reduce_quarter":
+                        actions.append((2, "reduce_quarter", "break_even_stop", 0.25, None))
+                    else:
+                        actions.append((1, "reduce_half", "break_even_stop", 0.5, None))
+
+            if not actions:
+                return False
+
+            _, action, reason, fraction, tier_index = sorted(actions, key=lambda item: item[0])[0]
+            close_position(i, price, reason, fraction=fraction)
+            if reason == "adverse_stop" and action != "close":
+                adverse_reduced = True
+            if reason == "break_even_stop" and action != "close":
+                break_even_fired = True
+            if reason == "time_in_loss_stop" and tier_index is not None:
+                time_loss_fired.add(tier_index)
+            return True
+
+        for i in range(len(signals)):
+            signal = int(signals[i])
+            price = float(prices[i])
+            target_pos = target_from_signal(signal)
+            marked_equity = mark_equity(price)
+            if marked_equity > peak_equity:
+                peak_equity = marked_equity
+            dd_abs = (peak_equity - marked_equity) / peak_equity if peak_equity > 0 else 0.0
+            no_new_entry, kill_switch = dd_blocks(dd_abs)
+
+            if position != 0:
+                if kill_switch:
+                    close_position(i, price, "kill_switch")
+                elif (position == 1 and target_pos <= 0) or (position == -1 and target_pos >= 0):
+                    close_position(i, price, "signal")
+                else:
+                    update_mfe(i, price)
+                    maybe_risk_stop(i, price)
+
+            if signal in (2, 3) and position == 0 and not kill_switch and not no_new_entry:
+                open_position(1 if signal == 2 else -1, i, price, dd_entry_size(dd_abs))
+
+            current_equity = mark_equity(price)
+            if not np.isfinite(current_equity) or current_equity > 1e15 or current_equity < 0:
+                equity.append(max(0, current_equity) if np.isfinite(current_equity) else 0)
+                break
+            equity.append(current_equity)
+
+        if position == 1:
+            close_position(len(signals) - 1, float(prices[-1]), "signal", final=True)
+            equity[-1] = capital
+        elif position == -1:
+            close_position(len(signals) - 1, float(prices[-1]), "signal", final=True)
             equity[-1] = capital
 
         return np.array(equity), trades
@@ -274,6 +716,7 @@ class StrategyEvaluator:
         signals: np.ndarray,
         prices: np.ndarray,
         df: pd.DataFrame | None = None,
+        position_sizes: np.ndarray | None = None,
     ) -> Tuple[float, Dict[str, float], List[Dict[str, Any]]]:
         """Evaluate a set of signals and return a composite score.
 
@@ -285,13 +728,14 @@ class StrategyEvaluator:
             signals: Integer array of trading signals.
             prices: Array of close prices.
             df: Optional DataFrame (unused; kept for API compatibility).
+            position_sizes: Optional per-bar entry size multipliers.
 
         Returns:
             A tuple ``(score, metrics, trades)`` where ``score`` is a
             composite float in [0, 1], ``metrics`` is the dict from
             ``compute_metrics``, and ``trades`` is the trade list.
         """
-        equity, trades = self.simulate(signals, prices, df)
+        equity, trades = self.simulate(signals, prices, df, position_sizes=position_sizes)
 
         # Guard: invalid equity curve
         if len(equity) == 0 or not np.all(np.isfinite(equity)):
