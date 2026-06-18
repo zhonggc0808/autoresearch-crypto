@@ -61,6 +61,12 @@ from dex.live.common import (
     round_to_tick,
     send_trade_notification,
 )
+from dex.live.profiles import (
+    profile_checkpoint_map,
+)
+from dex.live.profiles import (
+    resolve_checkpoint_path as resolve_live_checkpoint_path,
+)
 from dex.live.signals import generate_live_regime_channel_breakout_signal
 from dex.regime_permissions import (
     RiskOffConfig,
@@ -83,21 +89,12 @@ INTERVAL_SECONDS_MAP = {
     "1d": 86400,
 }
 
-BITGET_STRATEGY_PROFILES = {
-    "channel_breakout_v2_1_balanced": "checkpoints/channel_breakout_v2_1_balanced.pt",
-    "channel_breakout_v2_2_mtg_bcd": "checkpoints/channel_breakout_v2_2_mtg_bcd.json",
-}
+BITGET_STRATEGY_PROFILES = profile_checkpoint_map()
 
 
 def resolve_checkpoint_path(checkpoint_path: str | None, strategy_profile: str) -> str:
     """Resolve the checkpoint used by the Bitget live entrypoint."""
-    if checkpoint_path:
-        return checkpoint_path
-    try:
-        return BITGET_STRATEGY_PROFILES[strategy_profile]
-    except KeyError as exc:
-        known = ", ".join(sorted(BITGET_STRATEGY_PROFILES))
-        raise ValueError(f"未知策略档案 {strategy_profile!r}; 可选: {known}") from exc
+    return resolve_live_checkpoint_path(checkpoint_path, strategy_profile)
 
 
 CCXT_INTERVAL_MAP = {

@@ -63,6 +63,12 @@ from dex.live.common import (
     round_to_tick,
     send_trade_notification,
 )
+from dex.live.profiles import (
+    profile_checkpoint_map,
+)
+from dex.live.profiles import (
+    resolve_checkpoint_path as resolve_live_checkpoint_path,
+)
 from dex.live.signals import generate_live_regime_channel_breakout_signal
 from dex.regime_permissions import (
     RiskOffConfig,
@@ -76,13 +82,7 @@ LOCK_FILE = os.path.join(LOG_DIR, "live_okx_quant.lock")
 CACHE_DIR = "data/live_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-OKX_STRATEGY_PROFILES = {
-    "channel_breakout_v2": "checkpoints/channel_breakout_375_432.pt",
-    "channel_breakout_v2_1_balanced": "checkpoints/channel_breakout_v2_1_balanced.pt",
-    "channel_breakout_v2_2_mtg_bcd": "checkpoints/channel_breakout_v2_2_mtg_bcd.json",
-    "channel_breakout": "checkpoints/eth_optimal.pt",
-    "hybrid_mm": "checkpoints/quant_model.pt",
-}
+OKX_STRATEGY_PROFILES = profile_checkpoint_map()
 
 INTERVAL_SECONDS_MAP = {
     "1m": 60,
@@ -127,15 +127,7 @@ def load_state():
 
 def resolve_checkpoint_path(checkpoint_path: str | None, strategy_profile: str) -> str:
     """Resolve the checkpoint used by the OKX live entrypoint."""
-    if checkpoint_path:
-        return checkpoint_path
-    try:
-        return OKX_STRATEGY_PROFILES[strategy_profile]
-    except KeyError as exc:
-        known = ", ".join(sorted(OKX_STRATEGY_PROFILES))
-        raise ValueError(
-            f"Unknown strategy profile {strategy_profile!r}; expected one of: {known}"
-        ) from exc
+    return resolve_live_checkpoint_path(checkpoint_path, strategy_profile)
 
 
 def save_state(state):

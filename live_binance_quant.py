@@ -55,6 +55,12 @@ from dex.live.common import (
     round_to_tick,
     send_trade_notification,
 )
+from dex.live.profiles import (
+    profile_checkpoint_map,
+)
+from dex.live.profiles import (
+    resolve_checkpoint_path as resolve_live_checkpoint_path,
+)
 
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -79,6 +85,8 @@ CCXT_INTERVAL_MAP = {
     "4h": "4h",
     "1d": "1d",
 }
+
+BINANCE_STRATEGY_PROFILES = profile_checkpoint_map()
 
 
 try:
@@ -115,6 +123,11 @@ def load_state():
 def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def resolve_checkpoint_path(checkpoint_path: str | None, strategy_profile: str) -> str:
+    """Resolve the checkpoint used by the Binance live entrypoint."""
+    return resolve_live_checkpoint_path(checkpoint_path, strategy_profile)
 
 
 def log_message(msg):
@@ -1081,7 +1094,17 @@ def main():
         "--interval", type=str, default="5m", help="K线周期: 1m, 5m, 15m, 1h, 4h, 1d"
     )
     parser.add_argument(
-        "--checkpoint", type=str, default="checkpoints/quant_model.pt", help="策略参数路径"
+        "--strategy-profile",
+        type=str,
+        default="hybrid_mm",
+        choices=sorted(BINANCE_STRATEGY_PROFILES),
+        help="内置策略档案；默认 hybrid_mm，等价于旧默认 checkpoints/quant_model.pt",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="自定义策略参数路径；不填时使用 --strategy-profile 对应的 checkpoint",
     )
     parser.add_argument("--capital", type=float, default=100.0, help="每次交易保证金（USDT）")
     parser.add_argument("--leverage", type=float, default=1.0, help="杠杆倍数")
@@ -1117,6 +1140,8 @@ def main():
     interval_seconds = INTERVAL_SECONDS_MAP.get(args.interval, 300)
     enable_short = not args.long_only
     mode_str = "多空双向" if enable_short else "只做多"
+    checkpoint_override = args.checkpoint is not None
+    args.checkpoint = resolve_checkpoint_path(args.checkpoint, args.strategy_profile)
 
     # 加载策略参数
     log_message("=" * 50)
@@ -1124,6 +1149,9 @@ def main():
     log_message("混合费率: 开仓=Maker, 止盈=Maker, 止损=Taker, 超时=Maker")
     log_message(f"杠杆: {args.leverage}x")
     log_message(f"交易对: {args.symbol} -> {symbol}")
+    profile_note = " (overridden by --checkpoint)" if checkpoint_override else ""
+    log_message(f"策略档案: {args.strategy_profile}{profile_note}")
+    log_message(f"Checkpoint: {args.checkpoint}")
     if not os.path.exists(args.checkpoint):
         log_message(f"错误: 未找到 {args.checkpoint}，请先运行 train_quant.py 训练策略")
         sys.exit(1)
