@@ -99,6 +99,7 @@ def resolve_checkpoint_path(checkpoint_path: str | None, strategy_profile: str) 
         known = ", ".join(sorted(BITGET_STRATEGY_PROFILES))
         raise ValueError(f"未知策略档案 {strategy_profile!r}; 可选: {known}") from exc
 
+
 CCXT_INTERVAL_MAP = {
     "1m": "1m",
     "5m": "5m",
@@ -171,6 +172,46 @@ def notify_trade_action(action, *, notify_email_to=None, mode=None, symbol=None,
     )
 
 
+class LiveHalt(RuntimeError):
+    """Stop live trading without retrying the current loop."""
+
+
+class BitgetInsufficientMarginError(LiveHalt):
+    def __init__(self, error):
+        super().__init__("Bitget insufficient margin")
+        self.error = error
+
+
+def is_insufficient_margin_error(exc) -> bool:
+    text = str(exc).lower()
+    return (
+        isinstance(exc, ccxt.InsufficientFunds)
+        or ("insufficient" in text and "margin" in text)
+        or "not enough margin" in text
+    )
+
+
+def halt_due_to_insufficient_margin(
+    state, exc, *, notify_email_to=None, mode_name=None, symbol=None
+):
+    state["halted"] = True
+    state["halt_reason"] = "insufficient_margin"
+    state["halt_detail"] = str(getattr(exc, "error", exc))
+    state["halted_at"] = datetime.now().isoformat()
+    if not state.get("halt_notified"):
+        notify_trade_action(
+            "Bitget保证金不足，程序已停止",
+            notify_email_to=notify_email_to,
+            mode=mode_name,
+            symbol=symbol,
+            reason=state["halt_reason"],
+            detail=state["halt_detail"],
+        )
+        state["halt_notified"] = True
+    log_message("[HALT] Bitget保证金不足，已停止程序，避免重复下单请求")
+    raise LiveHalt("insufficient_margin") from exc
+
+
 def retry_on_exception(max_retries=3, delay=1.0, exceptions=(Exception,)):
     def decorator(func):
         @functools.wraps(func)
@@ -178,6 +219,8 @@ def retry_on_exception(max_retries=3, delay=1.0, exceptions=(Exception,)):
             for attempt in range(max_retries):
                 try:
                     return func(*args, **kwargs)
+                except LiveHalt:
+                    raise
                 except exceptions as e:
                     if attempt == max_retries - 1:
                         raise
@@ -727,11 +770,16 @@ def place_market_order(exchange, symbol, side, pos_side, sz, reduce_only=False):
     params = {}
     if reduce_only:
         params["reduceOnly"] = True
-    order = (
-        exchange.create_market_buy_order(symbol, sz, params)
-        if side == "buy"
-        else exchange.create_market_sell_order(symbol, sz, params)
-    )
+    try:
+        order = (
+            exchange.create_market_buy_order(symbol, sz, params)
+            if side == "buy"
+            else exchange.create_market_sell_order(symbol, sz, params)
+        )
+    except Exception as exc:
+        if is_insufficient_margin_error(exc):
+            raise BitgetInsufficientMarginError(exc) from exc
+        raise
     order_id = order.get("id")
     ro_tag = " REDUCE_ONLY" if reduce_only else ""
     log_message(f"市价单成功 [{side.upper()} {pos_side}{ro_tag}] 订单ID: {order_id}")
@@ -752,7 +800,12 @@ def place_limit_order(
         params["reduceOnly"] = True
 
     order_type = "limit"
-    order = exchange.create_order(symbol, order_type, side, sz, px, params)
+    try:
+        order = exchange.create_order(symbol, order_type, side, sz, px, params)
+    except Exception as exc:
+        if is_insufficient_margin_error(exc):
+            raise BitgetInsufficientMarginError(exc) from exc
+        raise
     order_id = order.get("id")
     tif = "POST_ONLY" if post_only else (time_in_force or "LIMIT")
     ro_tag = " REDUCE_ONLY" if reduce_only else ""
@@ -790,12 +843,16 @@ def execute_trade(
     best_bid,
     best_ask,
     force_ioc=False,
+    notify_email_to=None,
+    mode_name=None,
 ):
     """
     根据信号执行交易（支持多空双向）
     signal_id: 0=平仓, 1=持有, 2=做多, 3=做空
     force_ioc: True=强制用市价单(兜底模式), False=先尝试Maker挂单
     """
+    notify_email_to = notify_email_to or state.get("notify_email_to")
+    mode_name = mode_name or state.get("mode_name")
     # pending_close 保护：平仓未确认前不准开新仓
     if state.get("pending_close"):
         log_message(
@@ -886,26 +943,44 @@ def execute_trade(
         close_label = "平多" if position == 1 else "平空"
         close_type = "Maker(TP)" if close_plan.action == "maker" else "Taker(SL)"
         if close_plan.action == "maker":
-            order_id = place_limit_order(
-                exchange,
-                symbol,
-                close_plan.side,
-                close_plan.position_side,
-                close_plan.size,
-                close_plan.price,
-                post_only=True,
-                reduce_only=True,
-            )
+            try:
+                order_id = place_limit_order(
+                    exchange,
+                    symbol,
+                    close_plan.side,
+                    close_plan.position_side,
+                    close_plan.size,
+                    close_plan.price,
+                    post_only=True,
+                    reduce_only=True,
+                )
+            except BitgetInsufficientMarginError as exc:
+                halt_due_to_insufficient_margin(
+                    state,
+                    exc,
+                    notify_email_to=notify_email_to,
+                    mode_name=mode_name,
+                    symbol=symbol,
+                )
             order_price = close_plan.price
         elif close_plan.action == "taker":
-            order_id = place_market_order(
-                exchange,
-                symbol,
-                close_plan.side,
-                close_plan.position_side,
-                close_plan.size,
-                reduce_only=True,
-            )
+            try:
+                order_id = place_market_order(
+                    exchange,
+                    symbol,
+                    close_plan.side,
+                    close_plan.position_side,
+                    close_plan.size,
+                    reduce_only=True,
+                )
+            except BitgetInsufficientMarginError as exc:
+                halt_due_to_insufficient_margin(
+                    state,
+                    exc,
+                    notify_email_to=notify_email_to,
+                    mode_name=mode_name,
+                    symbol=symbol,
+                )
             order_price = current_price
         else:
             order_id = None
@@ -1029,9 +1104,18 @@ def execute_trade(
             else:
                 log_message(f"[跳过{open_label}] {plan.reason}")
         elif plan.action == "ioc":
-            order_id = place_market_order(
-                exchange, symbol, plan.side, plan.position_side, plan.size, reduce_only=False
-            )
+            try:
+                order_id = place_market_order(
+                    exchange, symbol, plan.side, plan.position_side, plan.size, reduce_only=False
+                )
+            except BitgetInsufficientMarginError as exc:
+                halt_due_to_insufficient_margin(
+                    state,
+                    exc,
+                    notify_email_to=notify_email_to,
+                    mode_name=mode_name,
+                    symbol=symbol,
+                )
             if order_id:
                 trades.append(
                     {
@@ -1053,16 +1137,25 @@ def execute_trade(
             else:
                 log_message(f"[{open_label}市价失败] 兜底单也未成交")
         else:
-            order_id = place_limit_order(
-                exchange,
-                symbol,
-                plan.side,
-                plan.position_side,
-                plan.size,
-                plan.price,
-                post_only=True,
-                reduce_only=False,
-            )
+            try:
+                order_id = place_limit_order(
+                    exchange,
+                    symbol,
+                    plan.side,
+                    plan.position_side,
+                    plan.size,
+                    plan.price,
+                    post_only=True,
+                    reduce_only=False,
+                )
+            except BitgetInsufficientMarginError as exc:
+                halt_due_to_insufficient_margin(
+                    state,
+                    exc,
+                    notify_email_to=notify_email_to,
+                    mode_name=mode_name,
+                    symbol=symbol,
+                )
             if order_id:
                 trades.append(
                     {
@@ -1133,9 +1226,7 @@ def manage_tp_order(exchange, symbol, tick_sz, lot_sz, strategy, state):
     # 检查仓位方向一致
     actual_dir = 1 if actual_pos > 0 else (-1 if actual_pos < 0 else 0)
     if actual_dir != pos:
-        log_message(
-            f"[TP_SKIP_POSITION_MISMATCH] state_pos={pos} actual_pos={actual_pos:.6f}"
-        )
+        log_message(f"[TP_SKIP_POSITION_MISMATCH] state_pos={pos} actual_pos={actual_pos:.6f}")
         if tp_order_id:
             try:
                 exchange.cancel_order(tp_order_id, symbol)
@@ -1346,23 +1437,41 @@ def force_close(
     if use_maker:
         order_price = compute_order_price(side, best_bid, best_ask, tick_sz)
         if order_price:
-            order_id = place_limit_order(
-                exchange,
-                symbol,
-                side,
-                pos_side,
-                close_size,
-                order_price,
-                post_only=True,
-                reduce_only=True,
-            )
+            try:
+                order_id = place_limit_order(
+                    exchange,
+                    symbol,
+                    side,
+                    pos_side,
+                    close_size,
+                    order_price,
+                    post_only=True,
+                    reduce_only=True,
+                )
+            except BitgetInsufficientMarginError as exc:
+                halt_due_to_insufficient_margin(
+                    state,
+                    exc,
+                    notify_email_to=state.get("notify_email_to"),
+                    mode_name=state.get("mode_name"),
+                    symbol=symbol,
+                )
         else:
             order_id = None
         fee_label = "Maker"
     else:
-        order_id = place_market_order(
-            exchange, symbol, side, pos_side, close_size, reduce_only=True
-        )
+        try:
+            order_id = place_market_order(
+                exchange, symbol, side, pos_side, close_size, reduce_only=True
+            )
+        except BitgetInsufficientMarginError as exc:
+            halt_due_to_insufficient_margin(
+                state,
+                exc,
+                notify_email_to=state.get("notify_email_to"),
+                mode_name=state.get("mode_name"),
+                symbol=symbol,
+            )
         order_price = current_price
         fee_label = "Taker"
 
@@ -2060,8 +2169,12 @@ def main():
                 elif abs(actual_pos) >= lot_sz * 0.5 and state.get("pending_open"):
                     # pending_open 挂单成交了（但还没被主循环检测到）
                     pos_dir = 1 if actual_pos > 0 else -1
-                    flip_open_filled_tag_sync = " [FLIP_OPEN_FILLED]" if state.get("pending_open_is_flip") else ""
-                    log_message(f"[持仓同步] 检测到挂单已成交: 实际={actual_pos:.6f}{flip_open_filled_tag_sync}")
+                    flip_open_filled_tag_sync = (
+                        " [FLIP_OPEN_FILLED]" if state.get("pending_open_is_flip") else ""
+                    )
+                    log_message(
+                        f"[持仓同步] 检测到挂单已成交: 实际={actual_pos:.6f}{flip_open_filled_tag_sync}"
+                    )
                     if state.get("pending_open_is_flip"):
                         state["pending_open_is_flip"] = False
                     state["position"] = pos_dir
@@ -2499,7 +2612,11 @@ def main():
                                 state["pending_open"] = False
                                 state["pending_order_id"] = None
                                 pos_name = "多" if pos_dir == 1 else "空"
-                                flip_open_filled_tag = " [FLIP_OPEN_FILLED]" if state.get("pending_open_is_flip") else ""
+                                flip_open_filled_tag = (
+                                    " [FLIP_OPEN_FILLED]"
+                                    if state.get("pending_open_is_flip")
+                                    else ""
+                                )
                                 log_message(
                                     f"[Maker成交] 入场成功 {pos_name} @{state['entry_price']:.2f} size={state['strategy_size']:.8f}{flip_open_filled_tag}"
                                 )
@@ -2654,6 +2771,22 @@ def main():
                     print_status(exchange, symbol, state, leverage=args.leverage)
                     save_state(state)
 
+            except BitgetInsufficientMarginError as e:
+                try:
+                    halt_due_to_insufficient_margin(
+                        state,
+                        e,
+                        notify_email_to=args.notify_email_to,
+                        mode_name=mode_name,
+                        symbol=symbol,
+                    )
+                except LiveHalt:
+                    pass
+                save_state(state)
+                return
+            except LiveHalt:
+                save_state(state)
+                return
             except Exception as e:
                 log_message(f"本轮执行异常: {e}")
                 import traceback

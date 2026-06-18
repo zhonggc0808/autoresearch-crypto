@@ -168,6 +168,49 @@ def notify_trade_action(action, *, notify_email_to=None, mode=None, symbol=None,
     )
 
 
+class LiveHalt(RuntimeError):
+    """Stop live trading without retrying the current loop."""
+
+
+class OKXInsufficientMarginError(LiveHalt):
+    def __init__(self, response):
+        super().__init__("OKX insufficient USDT margin")
+        self.response = response
+
+
+def is_okx_insufficient_margin_response(resp) -> bool:
+    data = resp.get("data", []) if isinstance(resp, dict) else []
+    messages = [str(resp.get("msg", ""))] if isinstance(resp, dict) else []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("sCode", "")) == "51008":
+            return True
+        messages.append(str(item.get("sMsg", "")))
+    return any("insufficient usdt margin" in msg.lower() for msg in messages)
+
+
+def halt_due_to_insufficient_margin(
+    state, exc, *, notify_email_to=None, mode_name=None, symbol=None
+):
+    state["halted"] = True
+    state["halt_reason"] = "insufficient_margin"
+    state["halt_detail"] = str(getattr(exc, "response", exc))
+    state["halted_at"] = datetime.now().isoformat()
+    if not state.get("halt_notified"):
+        notify_trade_action(
+            "OKX保证金不足，程序已停止",
+            notify_email_to=notify_email_to,
+            mode=mode_name,
+            symbol=symbol,
+            reason=state["halt_reason"],
+            detail=state["halt_detail"],
+        )
+        state["halt_notified"] = True
+    log_message("[HALT] OKX保证金不足，已停止程序，避免重复下单请求")
+    raise LiveHalt("insufficient_margin") from exc
+
+
 def okx_float(value, default=0.0):
     if value in (None, ""):
         return default
@@ -184,6 +227,8 @@ def retry_on_exception(max_retries=3, delay=1.0, exceptions=(Exception,)):
             for attempt in range(max_retries):
                 try:
                     return func(*args, **kwargs)
+                except LiveHalt:
+                    raise
                 except exceptions as e:
                     if attempt == max_retries - 1:
                         raise
@@ -598,6 +643,8 @@ def place_market_order(trade_api, inst_id, side, pos_side, sz, td_mode="cross", 
         log_message(f"市价单成功 [{side.upper()} {pos_side}{ro_tag}] 订单ID: {order_id}")
         return order_id
     else:
+        if is_okx_insufficient_margin_response(resp):
+            raise OKXInsufficientMarginError(resp)
         log_message(f"市价单失败: {resp}")
         return None
 
@@ -627,6 +674,8 @@ def place_limit_order(
         )
         return order_id
     else:
+        if is_okx_insufficient_margin_response(resp):
+            raise OKXInsufficientMarginError(resp)
         log_message(f"限价单失败: {resp}")
         return None
 
@@ -743,27 +792,45 @@ def execute_trade(
         close_label = "平多" if position == 1 else "平空"
         close_type = "Maker(TP)" if close_plan.action == "maker" else "Taker(SL)"
         if close_plan.action == "maker":
-            order_id = place_limit_order(
-                trade_api,
-                inst_id,
-                close_plan.side,
-                close_plan.position_side,
-                close_plan.size,
-                close_plan.price,
-                td_mode,
-                reduce_only=True,
-            )
+            try:
+                order_id = place_limit_order(
+                    trade_api,
+                    inst_id,
+                    close_plan.side,
+                    close_plan.position_side,
+                    close_plan.size,
+                    close_plan.price,
+                    td_mode,
+                    reduce_only=True,
+                )
+            except OKXInsufficientMarginError as exc:
+                halt_due_to_insufficient_margin(
+                    state,
+                    exc,
+                    notify_email_to=notify_email_to,
+                    mode_name=mode_name,
+                    symbol=inst_id,
+                )
             order_price = close_plan.price
         elif close_plan.action == "taker":
-            order_id = place_market_order(
-                trade_api,
-                inst_id,
-                close_plan.side,
-                close_plan.position_side,
-                close_plan.size,
-                td_mode,
-                reduce_only=True,
-            )
+            try:
+                order_id = place_market_order(
+                    trade_api,
+                    inst_id,
+                    close_plan.side,
+                    close_plan.position_side,
+                    close_plan.size,
+                    td_mode,
+                    reduce_only=True,
+                )
+            except OKXInsufficientMarginError as exc:
+                halt_due_to_insufficient_margin(
+                    state,
+                    exc,
+                    notify_email_to=notify_email_to,
+                    mode_name=mode_name,
+                    symbol=inst_id,
+                )
             order_price = current_price
         else:
             order_id = None
@@ -877,15 +944,24 @@ def execute_trade(
             else:
                 log_message(f"[跳过{open_label}] {plan.reason}")
         elif plan.action == "ioc":
-            order_id = place_market_order(
-                trade_api,
-                inst_id,
-                plan.side,
-                plan.position_side,
-                plan.size,
-                td_mode,
-                reduce_only=False,
-            )
+            try:
+                order_id = place_market_order(
+                    trade_api,
+                    inst_id,
+                    plan.side,
+                    plan.position_side,
+                    plan.size,
+                    td_mode,
+                    reduce_only=False,
+                )
+            except OKXInsufficientMarginError as exc:
+                halt_due_to_insufficient_margin(
+                    state,
+                    exc,
+                    notify_email_to=notify_email_to,
+                    mode_name=mode_name,
+                    symbol=inst_id,
+                )
             if order_id:
                 trades.append(
                     {
@@ -921,16 +997,25 @@ def execute_trade(
             else:
                 log_message(f"[{open_label}市价失败] 兜底单也未成交")
         else:
-            order_id = place_limit_order(
-                trade_api,
-                inst_id,
-                plan.side,
-                plan.position_side,
-                plan.size,
-                plan.price,
-                td_mode,
-                reduce_only=False,
-            )
+            try:
+                order_id = place_limit_order(
+                    trade_api,
+                    inst_id,
+                    plan.side,
+                    plan.position_side,
+                    plan.size,
+                    plan.price,
+                    td_mode,
+                    reduce_only=False,
+                )
+            except OKXInsufficientMarginError as exc:
+                halt_due_to_insufficient_margin(
+                    state,
+                    exc,
+                    notify_email_to=notify_email_to,
+                    mode_name=mode_name,
+                    symbol=inst_id,
+                )
             if order_id:
                 trades.append(
                     {
@@ -1429,7 +1514,9 @@ def main():
         default=os.environ.get("TRADE_NOTIFY_EMAIL_TO", ""),
         help="交易动作邮件通知收件人；也可用 TRADE_NOTIFY_EMAIL_TO 配置",
     )
-    parser.add_argument("--stop-loss", type=float, default=0.0, help="止损百分比（默认关闭；建议 ≤0.10）")
+    parser.add_argument(
+        "--stop-loss", type=float, default=0.0, help="止损百分比（默认关闭；建议 ≤0.10）"
+    )
     parser.add_argument("--max-hold", type=int, default=48, help="最大持仓K线数（默认 48）")
     parser.add_argument("--short", action="store_true", default=True, help="启用做空（默认开启）")
     parser.add_argument("--long-only", action="store_true", help="只做多，不做空")
@@ -2345,6 +2432,24 @@ def main():
                         )
                         save_state(state)
 
+            except OKXInsufficientMarginError as e:
+                try:
+                    halt_due_to_insufficient_margin(
+                        state,
+                        e,
+                        notify_email_to=args.notify_email_to,
+                        mode_name=mode_name,
+                        symbol=args.symbol,
+                    )
+                except LiveHalt:
+                    pass
+                if not args.signal_only:
+                    save_state(state)
+                return
+            except LiveHalt:
+                if not args.signal_only:
+                    save_state(state)
+                return
             except Exception as e:
                 log_message(f"本轮执行异常: {e}")
                 import traceback

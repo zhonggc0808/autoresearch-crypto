@@ -110,6 +110,60 @@ def test_live_binance_entry_uses_shared_entry_plan(monkeypatch) -> None:
     assert new_state["trades"][0]["orderId"] == "binance-order-1"
 
 
+def test_live_binance_insufficient_margin_halts_and_notifies(monkeypatch) -> None:
+    module = importlib.import_module("live_binance_quant")
+    monkeypatch.setattr(module, "log_message", lambda _msg: None)
+    monkeypatch.setattr(module, "cancel_all_orders", lambda _exchange, _symbol: True)
+    monkeypatch.setattr(module, "get_position", lambda _exchange, _symbol: 0.0)
+    monkeypatch.setattr(
+        module,
+        "plan_entry_order",
+        lambda **_kwargs: EntryOrderPlan(
+            action="maker",
+            side="buy",
+            position_side="long",
+            size=0.02,
+            price=1999.9,
+            notional=40.0,
+            target_position=1,
+            trade_type="BUY_OPEN_MAKER",
+        ),
+    )
+    notices = []
+    monkeypatch.setattr(
+        module,
+        "notify_trade_action",
+        lambda action, **kwargs: notices.append((action, kwargs)) or True,
+    )
+
+    class FakeExchange:
+        def create_order(self, *_args, **_kwargs):
+            raise module.ccxt.InsufficientFunds(
+                'binanceusdm {"code":-2019,"msg":"Margin is insufficient."}'
+            )
+
+    state = {"position": 0, "strategy_size": 0.0, "trades": [], "bar_count": 7}
+    with pytest.raises(module.LiveHalt):
+        module.execute_trade(
+            signal_id=2,
+            exchange=FakeExchange(),
+            symbol="BTC/USDT:USDT",
+            tick_sz=0.1,
+            lot_sz=0.001,
+            capital_per_trade=50.0,
+            state=state,
+            current_price=2000.0,
+            best_bid=1999.9,
+            best_ask=2000.0,
+            notify_email_to="ops@example.com",
+            mode_name="Demo",
+        )
+
+    assert state["halted"] is True
+    assert state["halt_reason"] == "insufficient_margin"
+    assert notices[0][0] == "Binance保证金不足，程序已停止"
+
+
 def test_live_okx_entry_uses_shared_entry_plan(monkeypatch) -> None:
     module = importlib.import_module("live_okx_quant")
     monkeypatch.setattr(module, "log_message", lambda _msg: None)
@@ -131,7 +185,9 @@ def test_live_okx_entry_uses_shared_entry_plan(monkeypatch) -> None:
     )
     orders = []
 
-    def fake_limit_order(trade_api, inst_id, side, pos_side, sz, px, td_mode="cross", reduce_only=False):
+    def fake_limit_order(
+        trade_api, inst_id, side, pos_side, sz, px, td_mode="cross", reduce_only=False
+    ):
         orders.append((trade_api, inst_id, side, pos_side, sz, px, td_mode))
         return "okx-order-1"
 
@@ -160,6 +216,122 @@ def test_live_okx_entry_uses_shared_entry_plan(monkeypatch) -> None:
     assert orders[0][4:6] == (0.03, 2000.1)
     assert new_state["pending_open"] is True
     assert new_state["trades"][0]["orderId"] == "okx-order-1"
+
+
+def test_live_okx_insufficient_margin_halts_and_notifies(monkeypatch) -> None:
+    module = importlib.import_module("live_okx_quant")
+    monkeypatch.setattr(module, "log_message", lambda _msg: None)
+    monkeypatch.setattr(module, "cancel_all_orders", lambda _trade_api, _inst_id: True)
+    monkeypatch.setattr(module, "get_position", lambda _account_api, _inst_id: 0.0)
+    monkeypatch.setattr(
+        module,
+        "plan_entry_order",
+        lambda **_kwargs: EntryOrderPlan(
+            action="maker",
+            side="sell",
+            position_side="short",
+            size=0.03,
+            price=2000.1,
+            notional=60.0,
+            target_position=-1,
+            trade_type="SELL_SHORT_MAKER",
+        ),
+    )
+    notices = []
+    monkeypatch.setattr(
+        module,
+        "notify_trade_action",
+        lambda action, **kwargs: notices.append((action, kwargs)) or True,
+    )
+
+    def reject_limit_order(*_args, **_kwargs):
+        raise module.OKXInsufficientMarginError(
+            {
+                "code": "1",
+                "data": [
+                    {
+                        "sCode": "51008",
+                        "sMsg": "Order failed. Insufficient USDT margin in account ",
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(module, "place_limit_order", reject_limit_order)
+
+    state = {"position": 0, "strategy_size": 0.0, "trades": [], "bar_count": 7}
+    with pytest.raises(module.LiveHalt):
+        module.execute_trade(
+            signal_id=3,
+            trade_api=object(),
+            account_api=object(),
+            inst_id="BTC-USDT-SWAP",
+            tick_sz=0.1,
+            lot_sz=0.001,
+            capital_per_trade=50.0,
+            state=state,
+            current_price=2000.0,
+            best_bid=1999.9,
+            best_ask=2000.0,
+            notify_email_to="ops@example.com",
+            mode_name="Demo",
+        )
+
+    assert state["halted"] is True
+    assert state["halt_reason"] == "insufficient_margin"
+    assert notices[0][0] == "OKX保证金不足，程序已停止"
+
+
+def test_live_bitget_insufficient_margin_halts_and_notifies(monkeypatch) -> None:
+    module = importlib.import_module("live_bitget_quant")
+    monkeypatch.setattr(module, "log_message", lambda _msg: None)
+    monkeypatch.setattr(module, "cancel_all_orders", lambda _exchange, _symbol: True)
+    monkeypatch.setattr(module, "get_position", lambda _exchange, _symbol: 0.0)
+    monkeypatch.setattr(
+        module,
+        "plan_entry_order",
+        lambda **_kwargs: EntryOrderPlan(
+            action="maker",
+            side="sell",
+            position_side="short",
+            size=0.03,
+            price=2000.1,
+            notional=60.0,
+            target_position=-1,
+            trade_type="SELL_SHORT_MAKER",
+        ),
+    )
+    notices = []
+    monkeypatch.setattr(
+        module,
+        "notify_trade_action",
+        lambda action, **kwargs: notices.append((action, kwargs)) or True,
+    )
+
+    class FakeExchange:
+        def create_order(self, *_args, **_kwargs):
+            raise Exception("bitget: not enough margin to place order")
+
+    state = {"position": 0, "strategy_size": 0.0, "trades": [], "bar_count": 7}
+    with pytest.raises(module.LiveHalt):
+        module.execute_trade(
+            signal_id=3,
+            exchange=FakeExchange(),
+            symbol="BTC/USDT:USDT",
+            tick_sz=0.1,
+            lot_sz=0.001,
+            capital_per_trade=50.0,
+            state=state,
+            current_price=2000.0,
+            best_bid=1999.9,
+            best_ask=2000.0,
+            notify_email_to="ops@example.com",
+            mode_name="Demo",
+        )
+
+    assert state["halted"] is True
+    assert state["halt_reason"] == "insufficient_margin"
+    assert notices[0][0] == "Bitget保证金不足，程序已停止"
 
 
 def test_live_okx_empty_proxy_disables_proxy(monkeypatch) -> None:
@@ -263,7 +435,9 @@ def test_live_okx_close_uses_shared_close_plan(monkeypatch) -> None:
     )
     orders = []
 
-    def fake_market_order(trade_api, inst_id, side, pos_side, sz, td_mode="cross", reduce_only=False):
+    def fake_market_order(
+        trade_api, inst_id, side, pos_side, sz, td_mode="cross", reduce_only=False
+    ):
         orders.append((trade_api, inst_id, side, pos_side, sz, td_mode))
         return "okx-close-1"
 
