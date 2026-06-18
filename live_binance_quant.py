@@ -43,10 +43,13 @@ import ccxt
 import pandas as pd
 
 from dex.checkpoints import (
+    build_channel_breakout_strategy_from_checkpoint,
     build_strategy_from_checkpoint,
     describe_strategy,
+    is_regime_channel_breakout_checkpoint,
     load_checkpoint,
 )
+from dex.data import list_crypto_files, load_crypto_data
 from dex.live.common import (
     compute_order_price,
     plan_close_order,
@@ -57,9 +60,15 @@ from dex.live.common import (
 )
 from dex.live.profiles import (
     profile_checkpoint_map,
+    risk_config_for_profile,
 )
 from dex.live.profiles import (
     resolve_checkpoint_path as resolve_live_checkpoint_path,
+)
+from dex.live.risk import evaluate_live_risk
+from dex.live.signals import generate_live_regime_channel_breakout_signal
+from dex.regime_permissions import (
+    RiskOffConfig,
 )
 
 LOG_DIR = "logs"
@@ -67,6 +76,8 @@ os.makedirs(LOG_DIR, exist_ok=True)
 STATE_FILE = os.path.join(LOG_DIR, "live_binance_state.json")
 LOG_FILE = os.path.join(LOG_DIR, "live_binance_log.txt")
 LOCK_FILE = os.path.join(LOG_DIR, "live_binance_quant.lock")
+CACHE_DIR = "data/live_cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
 
 INTERVAL_SECONDS_MAP = {
     "1m": 60,
@@ -390,18 +401,116 @@ def get_instrument_info(exchange, symbol):
     }
 
 
-@retry_on_exception(max_retries=3, delay=1.0)
-def fetch_candles(exchange, symbol, bar="5m", limit=500):
-    """获取 Binance K 线数据"""
-    ccxt_interval = CCXT_INTERVAL_MAP.get(bar, bar)
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=ccxt_interval, limit=limit)
-    if not ohlcv:
-        log_message("获取K线失败: 返回为空")
+def _cache_path(symbol: str, interval: str) -> str:
+    norm_symbol = symbol.replace("/", "_").replace(":", "_")
+    return os.path.join(CACHE_DIR, f"binance_{norm_symbol}_{interval}.parquet")
+
+
+def _load_klines_cache(symbol: str, interval: str):
+    path = _cache_path(symbol, interval)
+    if not os.path.exists(path):
+        return None
+    try:
+        df = pd.read_parquet(path)
+        if not df.empty and "timestamp" in df.columns:
+            log_message(f"K线缓存加载: {path} ({len(df)} bars)")
+            return df
+    except Exception as e:
+        log_message(f"K线缓存读取失败: {e}，重新获取")
+    return None
+
+
+def _save_klines_cache(df, symbol: str, interval: str):
+    if df is None or df.empty:
+        return
+    path = _cache_path(symbol, interval)
+    df.to_parquet(path, index=False)
+    log_message(f"K线缓存保存: {path} ({len(df)} bars)")
+
+
+def _merge_klines(df_new, df_cache):
+    combined = pd.concat([df for df in [df_cache, df_new] if df is not None], ignore_index=True)
+    return (
+        combined.drop_duplicates(subset=["timestamp"], keep="last")
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
+
+
+def _seed_from_local_parquet(symbol: str, interval: str):
+    try:
+        if "/" in symbol:
+            parts = symbol.split("/")
+            raw_symbol = parts[0] + parts[1].split(":")[0]
+        else:
+            raw_symbol = symbol.upper().replace("-", "").replace("SWAP", "")
+        files = list_crypto_files()
+        matches = [
+            f for f in files if raw_symbol.upper() in str(f).upper() and f"_{interval}" in str(f)
+        ]
+        if not matches:
+            log_message(f"本地 parquet 未找到匹配: {raw_symbol} {interval}")
+            return None
+        matches.sort(key=lambda p: os.path.getsize(p), reverse=True)
+        raw_df = load_crypto_data(matches[0])
+        if raw_df is None or raw_df.empty:
+            return None
+        if "timestamp" not in raw_df.columns and "datetime" in raw_df.columns:
+            raw_df["timestamp"] = pd.to_datetime(raw_df["datetime"]).astype("int64") // 10**6
+        elif "timestamp" in raw_df.columns:
+            raw_df["timestamp"] = pd.to_numeric(raw_df["timestamp"], errors="coerce").astype(
+                "Int64"
+            )
+        if "datetime" not in raw_df.columns:
+            raw_df["datetime"] = pd.to_datetime(raw_df["timestamp"], unit="ms")
+        log_message(f"本地 parquet 命中: {matches[0]} ({len(raw_df)} bars)")
+        return raw_df
+    except Exception as e:
+        log_message(f"本地 parquet 加载失败: {e}")
         return None
 
-    records = []
-    for c in ohlcv:
-        records.append(
+
+def ensure_klines(exchange, symbol: str, interval: str, required_bars: int) -> pd.DataFrame:
+    cache = _load_klines_cache(symbol, interval)
+    recent = fetch_candles(exchange, symbol, bar=interval, limit=1500)
+    if recent is None:
+        return cache
+    df = _merge_klines(recent, cache)
+    if len(df) < required_bars:
+        local_df = _seed_from_local_parquet(symbol, interval)
+        if local_df is not None:
+            df = _merge_klines(local_df, df)
+    _save_klines_cache(df, symbol, interval)
+    if len(df) < required_bars:
+        log_message(
+            f"警告: K线缓存仍不足 required_bars ({len(df)} < {required_bars})。"
+            f"regime/permission 计算可能不可靠。"
+        )
+    else:
+        log_message(f"K线就绪: {len(df)} bars (需要 {required_bars})")
+    return df
+
+
+@retry_on_exception(max_retries=3, delay=1.0)
+def fetch_candles(exchange, symbol, bar="5m", limit=500):
+    """获取 Binance K 线数据。"""
+    ccxt_interval = CCXT_INTERVAL_MAP.get(bar, bar)
+    interval_ms = INTERVAL_SECONDS_MAP.get(bar, 300) * 1000
+    max_limit = 1500
+    all_records = []
+    since = None
+    max_pages = (limit // max_limit) + 3
+
+    for _ in range(max_pages):
+        if len(all_records) >= limit:
+            break
+        fetch_limit = min(max_limit, limit)
+        ohlcv = exchange.fetch_ohlcv(
+            symbol, timeframe=ccxt_interval, limit=fetch_limit, since=since
+        )
+        if not ohlcv:
+            break
+        records = [
             {
                 "timestamp": int(c[0]),
                 "open": float(c[1]),
@@ -411,9 +520,26 @@ def fetch_candles(exchange, symbol, bar="5m", limit=500):
                 "volume": float(c[5]),
                 "datetime": pd.to_datetime(int(c[0]), unit="ms"),
             }
-        )
+            for c in ohlcv
+        ]
+        if not all_records:
+            all_records = records
+        else:
+            oldest_ts = all_records[0]["timestamp"]
+            new_records = [r for r in records if r["timestamp"] < oldest_ts]
+            if not new_records:
+                break
+            all_records = new_records + all_records
+            if len(new_records) < max_limit * 0.5:
+                break
+        since = max(0, all_records[0]["timestamp"] - (fetch_limit + 10) * interval_ms)
 
-    df = pd.DataFrame(records)
+    if not all_records:
+        log_message("获取K线失败: 返回为空")
+        return None
+
+    df = pd.DataFrame(all_records[-limit:])
+    log_message(f"K线加载完成: {len(df)} 根 (目标 {limit})")
     return df
 
 
@@ -927,6 +1053,8 @@ def force_close(
     lot_sz,
     reason,
     use_maker=False,
+    fraction=1.0,
+    success_state_updates=None,
 ):
     """
     强制平仓。
@@ -943,9 +1071,13 @@ def force_close(
     cancel_all_orders(exchange, symbol)
 
     actual_position = get_position(exchange, symbol)
+    close_fraction = max(0.0, min(1.0, float(fraction)))
+    if close_fraction <= 0:
+        return state
     close_size = (
         min(strategy_size, abs(actual_position)) if abs(actual_position) > 0 else strategy_size
     )
+    close_size *= close_fraction
     if close_size > 0:
         close_size = round_to_size(close_size, lot_sz)
     if close_size <= 0:
@@ -1012,16 +1144,35 @@ def force_close(
             }
         )
         state["trades"] = trades
-        state["position"] = 0
-        state["strategy_size"] = 0.0
-        state["entry_bar"] = 0
-        state["last_signal"] = 0
+        if success_state_updates:
+            state.update(success_state_updates)
+        if close_fraction < 1.0:
+            actual_after = get_position(exchange, symbol)
+            if abs(actual_after) >= lot_sz * 0.5:
+                state["position"] = 1 if actual_after > 0 else -1
+                state["strategy_size"] = abs(actual_after)
+                log_message(
+                    f"[强制减仓-{fee_label}] {reason}，{pos_name}{side} "
+                    f"{close_size:.8f} @ {order_price}, remaining={abs(actual_after):.8f}"
+                )
+            else:
+                state["position"] = 0
+                state["strategy_size"] = 0.0
+                state["entry_bar"] = 0
+                state["last_signal"] = 0
+        else:
+            state["position"] = 0
+            state["strategy_size"] = 0.0
+            state["entry_bar"] = 0
+            state["last_signal"] = 0
         state["tp_order_id"] = None
         state["tp_price"] = 0.0
         state["tp_side"] = None
-        log_message(
-            f"[强制平仓-{fee_label}] {reason}，{pos_name}{side} {close_size:.8f} @ {order_price}"
-        )
+        if close_fraction >= 1.0 or state.get("position", 0) == 0:
+            log_message(
+                f"[强制平仓-{fee_label}] {reason}，"
+                f"{pos_name}{side} {close_size:.8f} @ {order_price}"
+            )
 
     state["last_update"] = datetime.now().isoformat()
     return state
@@ -1062,6 +1213,18 @@ def print_status(exchange, symbol, state, leverage=1.0):
 
     log_message("-" * 50)
     log_message(f"当前信号: {signal_str}")
+    if state.get("v21_regime"):
+        log_message(
+            f"v2.1: regime={state['v21_regime']} | "
+            f"perm={state.get('v21_permission_reason', '?')} | "
+            f"allow_L={state.get('v21_allow_long', '?')} "
+            f"allow_S={state.get('v21_allow_short', '?')} | "
+            f"raw={state.get('v21_raw_signal', '?')} "
+            f"permission={state.get('v21_permission_signal', '?')} "
+            f"routed={state.get('v21_routed_signal', '?')} | "
+            f"overlay={state.get('v21_exit_overlays_enabled', False)} "
+            f"overlay_changed={state.get('v21_exit_overlay_changed', False)}"
+        )
     log_message(f"持仓状态: {pos_str}")
     if state.get("pending_open"):
         pending_dir = "做多" if state.get("pending_open_signal") == 2 else "做空"
@@ -1074,6 +1237,41 @@ def print_status(exchange, symbol, state, leverage=1.0):
     log_message(f"USDT 余额: {eq_usdt:.2f} (可用: {avail_usdt:.2f})")
     log_message(f"交易次数: {len(state.get('trades', []))}")
     log_message("-" * 50)
+
+
+def _v21_generate_signal(
+    df,
+    bull_s,
+    bear_s,
+    neutral_s,
+    bull_cfg: RiskOffConfig,
+    bear_cfg: RiskOffConfig,
+    neutral_cfg: RiskOffConfig,
+    policy: str,
+    regime_fast: int,
+    regime_slow: int,
+    enable_short: bool,
+    exit_logic: dict | None = None,
+    exit_overlays_enabled: bool = True,
+) -> tuple:
+    return generate_live_regime_channel_breakout_signal(
+        df,
+        bull_s,
+        bear_s,
+        neutral_s,
+        bull_cfg,
+        bear_cfg,
+        neutral_cfg,
+        policy,
+        regime_fast,
+        regime_slow,
+        exit_logic=exit_logic,
+        exit_overlays_enabled=exit_overlays_enabled,
+    )
+
+
+def _signal_name(sig: int) -> str:
+    return {0: "FLAT", 1: "HOLD", 2: "LONG", 3: "SHORT"}.get(sig, f"UNKNOWN({sig})")
 
 
 # ---------------------------------------------------------------------------
@@ -1117,6 +1315,11 @@ def main():
     parser.add_argument("--once", action="store_true", help="只运行一次然后退出")
     parser.add_argument("--stop-loss", type=float, default=0.03, help="止损百分比（默认 3%%）")
     parser.add_argument("--max-hold", type=int, default=48, help="最大持仓K线数（默认 48）")
+    parser.add_argument(
+        "--disable-exit-overlays",
+        action="store_true",
+        help="禁用 v2.1/v2.2 checkpoint 内置 exit overlays",
+    )
     parser.add_argument("--short", action="store_true", default=True, help="启用做空（默认开启）")
     parser.add_argument("--long-only", action="store_true", help="只做多，不做空")
     parser.add_argument(
@@ -1142,6 +1345,7 @@ def main():
     mode_str = "多空双向" if enable_short else "只做多"
     checkpoint_override = args.checkpoint is not None
     args.checkpoint = resolve_checkpoint_path(args.checkpoint, args.strategy_profile)
+    risk_config = risk_config_for_profile(args.strategy_profile)
 
     # 加载策略参数
     log_message("=" * 50)
@@ -1152,23 +1356,60 @@ def main():
     profile_note = " (overridden by --checkpoint)" if checkpoint_override else ""
     log_message(f"策略档案: {args.strategy_profile}{profile_note}")
     log_message(f"Checkpoint: {args.checkpoint}")
+    log_message(f"Risk profile: {risk_config.get('risk_profile', 'none')}")
     if not os.path.exists(args.checkpoint):
         log_message(f"错误: 未找到 {args.checkpoint}，请先运行 train_quant.py 训练策略")
         sys.exit(1)
 
     checkpoint = load_checkpoint(args.checkpoint)
-    params = dict(checkpoint.get("params") or {})
-    if "rsi_low" in params:
-        params["rsi_low"] = max(params["rsi_low"], 30)
-    params["enable_short"] = enable_short
-    if checkpoint.get("strategy") != "scalp":
-        params.setdefault("max_hold_bars", args.max_hold)
-    checkpoint = dict(checkpoint)
-    checkpoint["params"] = params
-    strategy_type = checkpoint.get("strategy", "bollinger_trend_filter")
-    strategy = build_strategy_from_checkpoint(checkpoint)
-    for line in describe_strategy(strategy, strategy_type):
-        log_message(line)
+    is_v21 = is_regime_channel_breakout_checkpoint(checkpoint)
+
+    if is_v21:
+        log_message(f"检测到 v2.1-compatible checkpoint: {checkpoint.get('strategy_type')}")
+        log_message(f"  variant: {checkpoint.get('variant', '?')}")
+        log_message(f"  status: {checkpoint.get('status', '?')}")
+        v21_bull_s = build_channel_breakout_strategy_from_checkpoint(checkpoint, "bull")
+        v21_bear_s = build_channel_breakout_strategy_from_checkpoint(checkpoint, "bear")
+        v21_neutral_s = build_channel_breakout_strategy_from_checkpoint(checkpoint, "neutral")
+        v21_bull_cfg = RiskOffConfig(**checkpoint["bull"]["permission"])
+        v21_bear_cfg = RiskOffConfig(**checkpoint["bear"]["permission"])
+        v21_neutral_cfg = RiskOffConfig(**checkpoint["neutral"]["permission"])
+        v21_policy = checkpoint.get("regime_change_policy", "permission_based")
+        v21_regime_fast = checkpoint.get("regime_filter", {}).get("fast_days", 50)
+        v21_regime_slow = checkpoint.get("regime_filter", {}).get("slow_days", 200)
+        v21_exit_logic = checkpoint.get("exit_logic")
+        v21_exit_overlays_enabled = bool(v21_exit_logic) and not args.disable_exit_overlays
+        strategy = None
+        strategy_type = checkpoint.get("strategy_type", "regime_permission_channel_breakout")
+        log_message(f"BULL:  {checkpoint['bull']['candidate']}")
+        log_message(f"BEAR:  {checkpoint['bear']['candidate']}")
+        log_message(f"NEUTRAL: {checkpoint['neutral']['candidate']}")
+        log_message(f"Policy: {v21_policy}")
+        log_message(
+            "Exit overlays: "
+            + ("enabled" if v21_exit_overlays_enabled else "disabled")
+            + ("" if v21_exit_logic else " (no exit_logic)")
+        )
+    else:
+        params = dict(checkpoint.get("params") or {})
+        if "rsi_low" in params:
+            params["rsi_low"] = max(params["rsi_low"], 30)
+        params["enable_short"] = enable_short
+        if checkpoint.get("strategy") != "scalp":
+            params.setdefault("max_hold_bars", args.max_hold)
+        checkpoint = dict(checkpoint)
+        checkpoint["params"] = params
+        strategy_type = checkpoint.get("strategy", "bollinger_trend_filter")
+        strategy = build_strategy_from_checkpoint(checkpoint)
+        for line in describe_strategy(strategy, strategy_type):
+            log_message(line)
+        v21_bull_s = v21_bear_s = v21_neutral_s = None
+        v21_bull_cfg = v21_bear_cfg = v21_neutral_cfg = None
+        v21_policy = ""
+        v21_regime_fast = 50
+        v21_regime_slow = 200
+        v21_exit_logic = None
+        v21_exit_overlays_enabled = False
 
     # 初始化 Binance API
     exchange = init_binance_api(demo=args.demo)
@@ -1216,6 +1457,17 @@ def main():
             "pending_open_signal": 0,
             "pending_open_price": 0.0,
             "pending_open_size": 0.0,
+            "v21_regime": "",
+            "v21_permission_reason": "",
+            "v21_allow_long": True,
+            "v21_allow_short": True,
+            "v21_force_flat": False,
+            "v21_exit_only": False,
+            "v21_raw_signal": 1,
+            "v21_permission_signal": 1,
+            "v21_routed_signal": 1,
+            "v21_exit_overlays_enabled": False,
+            "v21_exit_overlay_changed": False,
             "notify_email_to": None,
             "mode_name": "",
         }
@@ -1239,6 +1491,17 @@ def main():
         state.setdefault("pending_open_price", 0.0)
         state.setdefault("pending_open_size", 0.0)
         state.setdefault("ccxt_symbol", symbol)
+        state.setdefault("v21_regime", "")
+        state.setdefault("v21_permission_reason", "")
+        state.setdefault("v21_allow_long", True)
+        state.setdefault("v21_allow_short", True)
+        state.setdefault("v21_force_flat", False)
+        state.setdefault("v21_exit_only", False)
+        state.setdefault("v21_raw_signal", 1)
+        state.setdefault("v21_permission_signal", 1)
+        state.setdefault("v21_routed_signal", 1)
+        state.setdefault("v21_exit_overlays_enabled", False)
+        state.setdefault("v21_exit_overlay_changed", False)
         state.setdefault("notify_email_to", None)
         state.setdefault("mode_name", "")
         if "strategy_btc" in state and "strategy_size" not in state:
@@ -1250,6 +1513,8 @@ def main():
 
     state["notify_email_to"] = args.notify_email_to
     state["mode_name"] = mode_name
+    state["strategy_profile"] = args.strategy_profile
+    state["risk_profile"] = risk_config.get("risk_profile", "none")
 
     try:
         while True:
@@ -1302,30 +1567,138 @@ def main():
                     state["pending_order_id"] = None
 
                 # 1. 获取 K 线数据
-                df = fetch_candles(exchange, symbol, bar=args.interval, limit=500)
-                if df is None or len(df) < strategy.window + 10:
+                if is_v21:
+                    bars_per_day = 86400 // interval_seconds
+                    max_strategy_window = (
+                        max(
+                            v21_bull_s.entry_lookback,
+                            v21_bull_s.exit_lookback,
+                            v21_bear_s.entry_lookback,
+                            v21_bear_s.exit_lookback,
+                            v21_neutral_s.entry_lookback,
+                            v21_neutral_s.exit_lookback,
+                        )
+                        if hasattr(v21_bull_s, "entry_lookback")
+                        else 8000
+                    )
+                    required_bars = max(
+                        max_strategy_window + 500,
+                        (v21_regime_slow + 60) * bars_per_day,
+                    )
+                    log_message(
+                        f"[K线需求] max_window={max_strategy_window} "
+                        f"regime_slow={v21_regime_slow} required_bars={required_bars}"
+                    )
+                    df = ensure_klines(exchange, symbol, args.interval, required_bars)
+                else:
+                    needed_bars = max(500, strategy.window + 100)
+                    df = fetch_candles(exchange, symbol, bar=args.interval, limit=needed_bars)
+
+                if is_v21 and df is not None and not df.empty:
+                    interval_ms = interval_seconds * 1000
+                    safety_delay_ms = 60000
+                    last_ts = int(df["timestamp"].iloc[-1])
+                    now_ms = int(time.time() * 1000)
+                    if last_ts + interval_ms + safety_delay_ms > now_ms:
+                        n_before = len(df)
+                        df = df.iloc[:-1].reset_index(drop=True)
+                        log_message(f"[已收盘K线] 丢弃未完成K线: {n_before} -> {len(df)}")
+
+                min_bars_ok = (
+                    (df is not None and len(df) >= (max_strategy_window + 10))
+                    if is_v21
+                    else (df is not None and len(df) >= strategy.window + 10)
+                )
+                if not min_bars_ok:
                     log_message("数据不足，跳过本轮")
                 else:
                     # 2. 生成信号
-                    signal_id, bb_info = predict_signal(strategy, df, enable_short=enable_short)
-                    current_price = bb_info["price"]
+                    if is_v21:
+                        ticker = exchange.fetch_ticker(symbol)
+                        current_price = float(ticker.get("last", float(df.iloc[-1]["close"])))
+                    else:
+                        signal_id, bb_info = predict_signal(strategy, df, enable_short=enable_short)
+                        current_price = bb_info["price"]
                     current_time = df.iloc[-1]["datetime"]
                     state["last_price"] = current_price
 
-                    log_message(f"K线时间: {current_time} | 价格: {current_price:.2f}")
-                    log_message(
-                        f"布林带: 上轨={bb_info['upper']:.2f} 中轨={bb_info['mid']:.2f} 下轨={bb_info['lower']:.2f}"
-                    )
-
                     state["bar_count"] = state.get("bar_count", 0) + 1
 
+                    if is_v21:
+                        signal_id, v21_diag = _v21_generate_signal(
+                            df,
+                            v21_bull_s,
+                            v21_bear_s,
+                            v21_neutral_s,
+                            v21_bull_cfg,
+                            v21_bear_cfg,
+                            v21_neutral_cfg,
+                            v21_policy,
+                            v21_regime_fast,
+                            v21_regime_slow,
+                            enable_short,
+                            exit_logic=v21_exit_logic,
+                            exit_overlays_enabled=v21_exit_overlays_enabled,
+                        )
+                        state["v21_regime"] = v21_diag["regime"]
+                        state["v21_permission_reason"] = v21_diag["permission_reason"]
+                        state["v21_allow_long"] = v21_diag["allow_long"]
+                        state["v21_allow_short"] = v21_diag["allow_short"]
+                        state["v21_force_flat"] = v21_diag["force_flat"]
+                        state["v21_exit_only"] = v21_diag["exit_only"]
+                        state["v21_raw_signal"] = v21_diag["raw_signal"]
+                        state["v21_permission_signal"] = v21_diag["permission_signal"]
+                        state["v21_routed_signal"] = v21_diag["routed_signal"]
+                        state["v21_exit_overlays_enabled"] = bool(
+                            v21_diag.get("exit_overlays_enabled", False)
+                        )
+                        state["v21_exit_overlay_changed"] = bool(
+                            v21_diag.get("exit_overlay_changed", False)
+                        )
+                        log_message(
+                            f"K线: {current_time} | 价格: {current_price:.2f} | "
+                            f"regime={v21_diag['regime']} | "
+                            f"signal={signal_id} ({_signal_name(signal_id)}) | "
+                            f"perm={v21_diag['permission_reason']} | "
+                            f"overlay={v21_diag.get('exit_overlays_enabled', False)}"
+                        )
+                    else:
+                        log_message(f"K线时间: {current_time} | 价格: {current_price:.2f}")
+                        log_message(
+                            f"布林带: 上轨={bb_info['upper']:.2f} 中轨={bb_info['mid']:.2f} 下轨={bb_info['lower']:.2f}"
+                        )
+
                     # 3. 检查止损/时间退出
-                    should_exit, exit_reason = check_stop_loss(
-                        state,
-                        current_price,
-                        stop_loss_pct=args.stop_loss,
-                        max_hold_bars=strategy.max_hold_bars,
-                    )
+                    if is_v21:
+                        if v21_diag["force_flat"]:
+                            should_exit = True
+                            exit_reason = f"force_flat ({v21_diag['permission_reason']})"
+                        elif state.get("position", 0) == 1 and not v21_diag["allow_long"]:
+                            should_exit = True
+                            exit_reason = (
+                                "risk-off: long no longer allowed "
+                                f"({v21_diag['permission_reason']})"
+                            )
+                        elif state.get("position", 0) == -1 and not v21_diag["allow_short"]:
+                            should_exit = True
+                            exit_reason = (
+                                "risk-off: short no longer allowed "
+                                f"({v21_diag['permission_reason']})"
+                            )
+                        else:
+                            should_exit, exit_reason = check_stop_loss(
+                                state,
+                                current_price,
+                                stop_loss_pct=args.stop_loss,
+                                max_hold_bars=99999,
+                            )
+                    else:
+                        should_exit, exit_reason = check_stop_loss(
+                            state,
+                            current_price,
+                            stop_loss_pct=args.stop_loss,
+                            max_hold_bars=strategy.max_hold_bars,
+                        )
 
                     # 4. 获取盘口数据
                     best_bid, best_ask = get_orderbook(exchange, symbol, depth=1)
@@ -1333,6 +1706,80 @@ def main():
                         log_message(f"盘口: bid={best_bid:.2f} ask={best_ask:.2f}")
                     else:
                         log_message("盘口数据不可用")
+
+                    risk_capital_per_trade = args.capital * args.leverage
+                    risk_action_handled = False
+                    if risk_config.get("risk_profile", "none") != "none":
+                        if state.get("position", 0) != 0 and "confirmed_entry_bar" not in state:
+                            state["confirmed_entry_bar"] = state.get("entry_bar", 0)
+                        _, current_equity = get_balance(exchange, "USDT")
+                        risk_decision = evaluate_live_risk(
+                            risk_config,
+                            state,
+                            position=state.get("position", 0),
+                            entry_price=state.get("entry_price", 0),
+                            current_close=current_price,
+                            current_equity=current_equity,
+                        )
+                        risk_updates = dict(risk_decision.state_updates)
+                        success_updates = {}
+                        if risk_decision.action != "none":
+                            fired = risk_updates.pop("risk_adverse_stop_fired", None)
+                            if fired is not None:
+                                success_updates["risk_adverse_stop_fired"] = fired
+                        state.update(risk_updates)
+                        risk_capital_per_trade *= risk_decision.entry_size_multiplier
+
+                        if state.get("position", 0) == 0 and not risk_decision.allow_new_entry:
+                            if state.get("pending_open"):
+                                cancel_all_orders(exchange, symbol)
+                                state["pending_open"] = False
+                                state["pending_order_id"] = None
+                                log_message("[LIVE_RISK] DD block canceled pending open")
+                            if signal_id in (2, 3):
+                                log_message(
+                                    f"[LIVE_RISK] DD block suppresses new entry "
+                                    f"(dd={risk_decision.current_drawdown:.2%})"
+                                )
+                                signal_id = 1
+
+                        signal_wants_close = signal_id == 0 and state.get("position", 0) != 0
+                        if (
+                            not should_exit
+                            and risk_decision.action in {"close", "reduce"}
+                            and (risk_decision.action == "close" or not signal_wants_close)
+                        ):
+                            state["pending_open"] = False
+                            reason = f"live_risk:{risk_decision.reason}"
+                            log_message(
+                                f"[LIVE_RISK] {risk_decision.action} "
+                                f"fraction={risk_decision.size_fraction:.2f} "
+                                f"dd={risk_decision.current_drawdown:.2%} reason={reason}"
+                            )
+                            state = force_close(
+                                exchange,
+                                symbol,
+                                state,
+                                current_price,
+                                best_bid,
+                                best_ask,
+                                tick_sz,
+                                lot_sz,
+                                reason,
+                                use_maker=False,
+                                fraction=risk_decision.size_fraction,
+                                success_state_updates=success_updates,
+                            )
+                            if risk_decision.action == "reduce" and state.get("position", 0) != 0:
+                                state = manage_tp_order(
+                                    exchange,
+                                    symbol,
+                                    tick_sz,
+                                    lot_sz,
+                                    strategy,
+                                    state,
+                                )
+                            risk_action_handled = True
 
                     if should_exit:
                         # 超时 -> Maker, 止损 -> Taker
@@ -1350,6 +1797,8 @@ def main():
                             exit_reason,
                             use_maker=is_timeout,
                         )
+                    elif risk_action_handled:
+                        pass
                     else:
                         # === 检查 pending_open 状态 ===
                         pending = state.get("pending_open", False)
@@ -1408,7 +1857,7 @@ def main():
                                         symbol,
                                         tick_sz,
                                         lot_sz,
-                                        args.capital * args.leverage,
+                                        risk_capital_per_trade,
                                         state,
                                         current_price,
                                         best_bid,
@@ -1434,7 +1883,7 @@ def main():
                                         symbol,
                                         tick_sz,
                                         lot_sz,
-                                        args.capital * args.leverage,
+                                        risk_capital_per_trade,
                                         state,
                                         current_price,
                                         best_bid,
@@ -1452,7 +1901,7 @@ def main():
                                     symbol,
                                     tick_sz,
                                     lot_sz,
-                                    args.capital * args.leverage,
+                                    risk_capital_per_trade,
                                     state,
                                     current_price,
                                     best_bid,
@@ -1507,7 +1956,7 @@ def main():
                                 symbol,
                                 tick_sz,
                                 lot_sz,
-                                args.capital * args.leverage,
+                                risk_capital_per_trade,
                                 state,
                                 current_price,
                                 best_bid,

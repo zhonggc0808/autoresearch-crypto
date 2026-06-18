@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import importlib
+
+from dex.checkpoints import is_regime_channel_breakout_checkpoint, load_checkpoint
 from dex.live.profiles import (
     get_live_strategy_profile,
     profile_checkpoint_map,
@@ -47,3 +50,12 @@ def test_profile_checkpoint_map_supports_all_live_entrypoints() -> None:
     assert "channel_breakout_v2_2_mtg_bcd" in profiles
     assert "channel_breakout_v2_3_combo_balanced" in profiles
     assert "hybrid_mm" in profiles
+
+
+def test_binance_v22_profile_has_regime_signal_helper() -> None:
+    checkpoint_path = resolve_checkpoint_path(None, "channel_breakout_v2_2_mtg_bcd")
+    checkpoint = load_checkpoint(checkpoint_path)
+    module = importlib.import_module("live_binance_quant")
+
+    assert is_regime_channel_breakout_checkpoint(checkpoint)
+    assert hasattr(module, "_v21_generate_signal")

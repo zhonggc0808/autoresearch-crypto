@@ -468,6 +468,157 @@ def test_live_okx_close_uses_shared_close_plan(monkeypatch) -> None:
     assert new_state["trades"][0]["type"] == "CLOSE_SHORT_Taker(SL)"
 
 
+def test_live_okx_force_close_fraction_keeps_remaining_position(monkeypatch) -> None:
+    module = importlib.import_module("live_okx_quant")
+    monkeypatch.setattr(module, "log_message", lambda _msg: None)
+    monkeypatch.setattr(module, "cancel_tp_order", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(module, "cancel_all_orders", lambda *_args, **_kwargs: True)
+    positions = iter([0.02, 0.01])
+    monkeypatch.setattr(module, "get_position", lambda *_args: next(positions))
+    orders = []
+
+    def fake_market_order(
+        trade_api, inst_id, side, pos_side, sz, td_mode="cross", reduce_only=False
+    ):
+        orders.append((side, pos_side, sz, td_mode, reduce_only))
+        return "okx-reduce-1"
+
+    monkeypatch.setattr(module, "place_market_order", fake_market_order)
+    state = {
+        "position": 1,
+        "strategy_size": 0.02,
+        "entry_price": 2000.0,
+        "trades": [],
+        "tp_order_id": "tp-1",
+    }
+
+    new_state = module.force_close(
+        trade_api=object(),
+        account_api=object(),
+        inst_id="BTC-USDT-SWAP",
+        state=state,
+        current_price=1900.0,
+        best_bid=1899.9,
+        best_ask=1900.0,
+        tick_sz=0.1,
+        lot_sz=0.001,
+        reason="live_risk:adverse_stop",
+        fraction=0.5,
+        success_state_updates={"risk_adverse_stop_fired": True},
+    )
+
+    assert orders == [("sell", "long", 0.01, "cross", True)]
+    assert new_state["position"] == 1
+    assert new_state["strategy_size"] == pytest.approx(0.01)
+    assert new_state["risk_adverse_stop_fired"] is True
+    assert new_state["tp_order_id"] is None
+
+
+def test_live_bitget_force_close_fraction_keeps_remaining_position(monkeypatch) -> None:
+    module = importlib.import_module("live_bitget_quant")
+    monkeypatch.setattr(module, "log_message", lambda _msg: None)
+    monkeypatch.setattr(module, "cancel_tp_order", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(module, "cancel_all_orders", lambda *_args, **_kwargs: True)
+    positions = iter([-0.04, -0.02])
+    monkeypatch.setattr(module, "get_position", lambda *_args: next(positions))
+    orders = []
+
+    def fake_market_order(exchange, symbol, side, pos_side, sz, reduce_only=False):
+        orders.append((side, pos_side, sz, reduce_only))
+        return "bitget-reduce-1"
+
+    monkeypatch.setattr(module, "place_market_order", fake_market_order)
+    state = {
+        "position": -1,
+        "strategy_size": 0.04,
+        "entry_price": 2000.0,
+        "trades": [],
+        "tp_order_id": "tp-1",
+    }
+
+    new_state = module.force_close(
+        exchange=object(),
+        symbol="BTC/USDT:USDT",
+        state=state,
+        current_price=2100.0,
+        best_bid=2099.9,
+        best_ask=2100.0,
+        tick_sz=0.1,
+        lot_sz=0.001,
+        reason="live_risk:adverse_stop",
+        fraction=0.5,
+        success_state_updates={"risk_adverse_stop_fired": True},
+    )
+
+    assert orders == [("buy", "short", 0.02, True)]
+    assert new_state["position"] == -1
+    assert new_state["strategy_size"] == pytest.approx(0.02)
+    assert new_state["risk_adverse_stop_fired"] is True
+    assert new_state["tp_order_id"] is None
+
+
+def test_live_binance_force_close_fraction_keeps_remaining_position(monkeypatch) -> None:
+    module = importlib.import_module("live_binance_quant")
+    monkeypatch.setattr(module, "log_message", lambda _msg: None)
+    monkeypatch.setattr(module, "cancel_tp_order", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(module, "cancel_all_orders", lambda *_args, **_kwargs: True)
+    positions = iter([0.06, 0.03])
+    monkeypatch.setattr(module, "get_position", lambda *_args: next(positions))
+    orders = []
+
+    def fake_market_order(exchange, symbol, side, pos_side, sz):
+        orders.append((side, pos_side, sz))
+        return "binance-reduce-1"
+
+    monkeypatch.setattr(module, "place_market_order", fake_market_order)
+    state = {
+        "position": 1,
+        "strategy_size": 0.06,
+        "entry_price": 2000.0,
+        "trades": [],
+        "tp_order_id": "tp-1",
+    }
+
+    new_state = module.force_close(
+        exchange=object(),
+        symbol="BTC/USDT:USDT",
+        state=state,
+        current_price=1900.0,
+        best_bid=1899.9,
+        best_ask=1900.0,
+        tick_sz=0.1,
+        lot_sz=0.001,
+        reason="live_risk:adverse_stop",
+        fraction=0.5,
+        success_state_updates={"risk_adverse_stop_fired": True},
+    )
+
+    assert orders == [("sell", "long", 0.03)]
+    assert new_state["position"] == 1
+    assert new_state["strategy_size"] == pytest.approx(0.03)
+    assert new_state["risk_adverse_stop_fired"] is True
+    assert new_state["tp_order_id"] is None
+
+
+def test_live_binance_fetch_candles_paginates_older_history(monkeypatch) -> None:
+    module = importlib.import_module("live_binance_quant")
+    monkeypatch.setattr(module, "log_message", lambda _msg: None)
+    interval_ms = module.INTERVAL_SECONDS_MAP["5m"] * 1000
+    calls = []
+
+    class FakeExchange:
+        def fetch_ohlcv(self, symbol, timeframe="5m", limit=500, since=None):
+            calls.append(since)
+            slots = range(10, 13) if since is None else range(5, 10)
+            return [[i * interval_ms, 1, 2, 0.5, 1.5, 100] for i in slots]
+
+    df = module.fetch_candles(FakeExchange(), "BTC/USDT:USDT", bar="5m", limit=6)
+
+    assert calls[0] is None
+    assert calls[1] is not None
+    assert list(df["timestamp"]) == [i * interval_ms for i in [7, 8, 9, 10, 11, 12]]
+
+
 def test_live_nado_close_uses_shared_close_plan(monkeypatch) -> None:
     module = importlib.import_module("live_nado_quant")
     monkeypatch.setattr(module, "log_message", lambda _msg: None)

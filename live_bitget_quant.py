@@ -63,10 +63,12 @@ from dex.live.common import (
 )
 from dex.live.profiles import (
     profile_checkpoint_map,
+    risk_config_for_profile,
 )
 from dex.live.profiles import (
     resolve_checkpoint_path as resolve_live_checkpoint_path,
 )
+from dex.live.risk import evaluate_live_risk
 from dex.live.signals import generate_live_regime_channel_breakout_signal
 from dex.regime_permissions import (
     RiskOffConfig,
@@ -1393,6 +1395,8 @@ def force_close(
     lot_sz,
     reason,
     use_maker=False,
+    fraction=1.0,
+    success_state_updates=None,
 ):
     """
     强制平仓。
@@ -1409,9 +1413,13 @@ def force_close(
     cancel_all_orders(exchange, symbol)
 
     actual_position = get_position(exchange, symbol)
+    close_fraction = max(0.0, min(1.0, float(fraction)))
+    if close_fraction <= 0:
+        return state
     close_size = (
         min(strategy_size, abs(actual_position)) if abs(actual_position) > 0 else strategy_size
     )
+    close_size *= close_fraction
     if close_size > 0:
         close_size = round_to_size(close_size, lot_sz)
     if close_size <= 0:
@@ -1488,6 +1496,9 @@ def force_close(
         )
         state["trades"] = trades
 
+        if success_state_updates:
+            state.update(success_state_updates)
+
         if use_maker:
             # Maker 强制平仓：设 pending_close，不清 position
             state["pending_close"] = True
@@ -1502,7 +1513,14 @@ def force_close(
         else:
             # Taker 强制平仓：再查询实际持仓确认
             actual_after = get_position(exchange, symbol)
-            if abs(actual_after) < lot_sz * 0.5:
+            if close_fraction < 1.0 and abs(actual_after) >= lot_sz * 0.5:
+                state["position"] = 1 if actual_after > 0 else -1
+                state["strategy_size"] = abs(actual_after)
+                log_message(
+                    f"[强制减仓-{fee_label}] {reason}，{pos_name}{side} "
+                    f"{close_size:.8f} @ {order_price}, remaining={abs(actual_after):.8f}"
+                )
+            elif abs(actual_after) < lot_sz * 0.5:
                 state["position"] = 0
                 state["strategy_size"] = 0.0
                 state["entry_bar"] = 0
@@ -1881,6 +1899,7 @@ def main():
     mode_str = "多空双向" if enable_short else "只做多"
     checkpoint_override = args.checkpoint is not None
     args.checkpoint = resolve_checkpoint_path(args.checkpoint, args.strategy_profile)
+    risk_config = risk_config_for_profile(args.strategy_profile)
 
     # 加载策略参数
     log_message("=" * 50)
@@ -1888,6 +1907,7 @@ def main():
     profile_note = " (overridden by --checkpoint)" if checkpoint_override else ""
     log_message(f"策略档案: {args.strategy_profile}{profile_note}")
     log_message(f"Checkpoint: {args.checkpoint}")
+    log_message(f"Risk profile: {risk_config.get('risk_profile', 'none')}")
     log_message("混合费率: 开仓=Maker, 止盈=Maker, 止损=Taker, 超时=Maker")
     log_message(f"杠杆: {args.leverage}x")
     log_message(f"交易对: {args.symbol} -> {symbol}")
@@ -2126,6 +2146,8 @@ def main():
     # 注入通知配置到 state（供 execute_trade 等函数读取）
     state["notify_email_to"] = args.notify_email_to
     state["mode_name"] = mode_name
+    state["strategy_profile"] = args.strategy_profile
+    state["risk_profile"] = risk_config.get("risk_profile", "none")
     save_state(state)
 
     try:
@@ -2533,6 +2555,80 @@ def main():
                     else:
                         log_message("盘口数据不可用")
 
+                    risk_capital_per_trade = args.capital * args.leverage
+                    risk_action_handled = False
+                    if not args.signal_only and risk_config.get("risk_profile", "none") != "none":
+                        if state.get("position", 0) != 0 and "confirmed_entry_bar" not in state:
+                            state["confirmed_entry_bar"] = state.get("entry_bar", 0)
+                        _, current_equity = get_balance(exchange, "USDT")
+                        risk_decision = evaluate_live_risk(
+                            risk_config,
+                            state,
+                            position=state.get("position", 0),
+                            entry_price=state.get("entry_price", 0),
+                            current_close=current_price,
+                            current_equity=current_equity,
+                        )
+                        risk_updates = dict(risk_decision.state_updates)
+                        success_updates = {}
+                        if risk_decision.action != "none":
+                            fired = risk_updates.pop("risk_adverse_stop_fired", None)
+                            if fired is not None:
+                                success_updates["risk_adverse_stop_fired"] = fired
+                        state.update(risk_updates)
+                        risk_capital_per_trade *= risk_decision.entry_size_multiplier
+
+                        if state.get("position", 0) == 0 and not risk_decision.allow_new_entry:
+                            if state.get("pending_open"):
+                                cancel_all_orders(exchange, symbol)
+                                state["pending_open"] = False
+                                state["pending_order_id"] = None
+                                log_message("[LIVE_RISK] DD block canceled pending open")
+                            if signal_id in (2, 3):
+                                log_message(
+                                    f"[LIVE_RISK] DD block suppresses new entry "
+                                    f"(dd={risk_decision.current_drawdown:.2%})"
+                                )
+                                signal_id = 1
+
+                        signal_wants_close = signal_id == 0 and state.get("position", 0) != 0
+                        if (
+                            not should_exit
+                            and risk_decision.action in {"close", "reduce"}
+                            and (risk_decision.action == "close" or not signal_wants_close)
+                        ):
+                            state["pending_open"] = False
+                            reason = f"live_risk:{risk_decision.reason}"
+                            log_message(
+                                f"[LIVE_RISK] {risk_decision.action} "
+                                f"fraction={risk_decision.size_fraction:.2f} "
+                                f"dd={risk_decision.current_drawdown:.2%} reason={reason}"
+                            )
+                            state = force_close(
+                                exchange,
+                                symbol,
+                                state,
+                                current_price,
+                                best_bid,
+                                best_ask,
+                                tick_sz,
+                                lot_sz,
+                                reason,
+                                use_maker=False,
+                                fraction=risk_decision.size_fraction,
+                                success_state_updates=success_updates,
+                            )
+                            if risk_decision.action == "reduce" and state.get("position", 0) != 0:
+                                state = manage_tp_order(
+                                    exchange,
+                                    symbol,
+                                    tick_sz,
+                                    lot_sz,
+                                    strategy,
+                                    state,
+                                )
+                            risk_action_handled = True
+
                     if should_exit:
                         # force_flat / risk-off / permission 禁止→taker reduce-only
                         is_risk_off = any(
@@ -2580,6 +2676,8 @@ def main():
                                 symbol=symbol,
                                 reason=exit_reason,
                             )
+                    elif risk_action_handled:
+                        pass
                     else:
                         # === 检查 pending_open 状态 ===
                         pending = state.get("pending_open", False)
@@ -2645,7 +2743,7 @@ def main():
                                         symbol,
                                         tick_sz,
                                         lot_sz,
-                                        args.capital * args.leverage,
+                                        risk_capital_per_trade,
                                         state,
                                         current_price,
                                         best_bid,
@@ -2671,7 +2769,7 @@ def main():
                                         symbol,
                                         tick_sz,
                                         lot_sz,
-                                        args.capital * args.leverage,
+                                        risk_capital_per_trade,
                                         state,
                                         current_price,
                                         best_bid,
@@ -2689,7 +2787,7 @@ def main():
                                     symbol,
                                     tick_sz,
                                     lot_sz,
-                                    args.capital * args.leverage,
+                                    risk_capital_per_trade,
                                     state,
                                     current_price,
                                     best_bid,
@@ -2744,7 +2842,7 @@ def main():
                                 symbol,
                                 tick_sz,
                                 lot_sz,
-                                args.capital * args.leverage,
+                                risk_capital_per_trade,
                                 state,
                                 current_price,
                                 best_bid,
