@@ -158,6 +158,43 @@ def _run_eval(dir_path: Path, **kwargs) -> Dict[str, Any]:
 
 
 # ===================================================================
+# Tests: Flags
+# ===================================================================
+
+
+class TestCodegenFlags:
+    """Verify codegen-specific scorecard flags."""
+
+    def test_trade_frequency_cap_rejects_high_turnover(self):
+        from scripts.evaluate_codegen_candidate import _compute_flags
+
+        metrics = {
+            "is": {"raw": {"dd": -0.10, "trades_per_year": 301}},
+            "oos": {"raw": {"dd": -0.10}},
+            "rolling": {"12m_min_return": 0.01},
+        }
+
+        flags = _compute_flags(metrics)
+
+        assert flags["status"] == "REJECT"
+        assert "Trade frequency exceeds 300/yr codegen cap" in flags["disqualifications"]
+
+    def test_trade_frequency_floor_rejects_dead_strategy(self):
+        from scripts.evaluate_codegen_candidate import _compute_flags
+
+        metrics = {
+            "is": {"raw": {"dd": -0.10, "trades_per_year": 0}},
+            "oos": {"raw": {"dd": -0.10}},
+            "rolling": {"12m_min_return": 0.0},
+        }
+
+        flags = _compute_flags(metrics)
+
+        assert flags["status"] == "REJECT"
+        assert "Trade frequency below 20/yr codegen floor" in flags["disqualifications"]
+
+
+# ===================================================================
 # Tests: Happy path
 # ===================================================================
 

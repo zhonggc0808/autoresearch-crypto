@@ -20,6 +20,10 @@ from typing import Any, Dict, List, Optional
 
 import jsonschema
 
+PROJECT_DIR = Path(__file__).resolve().parents[1]
+if str(PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(PROJECT_DIR))
+
 from scripts.family_registry import get as _get_family
 from scripts.family_registry import is_valid as _valid_family
 from scripts.family_registry import list_families
@@ -35,7 +39,6 @@ from scripts.validate_candidate_v02 import (
     print_errors as _print_errors,
 )
 
-PROJECT_DIR = Path(__file__).resolve().parents[1]
 SCHEMAS_DIR = PROJECT_DIR / "research_workspace" / "family_schemas"
 
 

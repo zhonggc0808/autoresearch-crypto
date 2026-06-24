@@ -1,0 +1,134 @@
+{
+  "strategy_type": "exit_logic_channel_breakout",
+  "version": "2.2-research",
+  "variant": "channel_breakout_v2_2_m375_bbm375_1p5_retest_w96_tol50bp_nextopen",
+  "status": "research_candidate",
+  "experiment_id": "v22_bbm375_1p5_retest_nextopen_research_20260621",
+  "parent_id": "channel_breakout_v2_2_m375_bbm375_1p5",
+  "description": "ChannelBreakout v2.2 MTG+BCD plus BBm375/1.5 breakout confirmation and Donchian retest confirmation: after a raw breakout, wait up to 96 completed 5m bars for a 0.5% retest of the Donchian breakout level, require close to hold the breakout and still satisfy the Bollinger breakout direction, then emit the entry signal one completed bar later.",
+  "regime_change_policy": "permission_based",
+  "regime_filter": {
+    "fast_days": 50,
+    "slow_days": 200
+  },
+  "exit_logic": {
+    "exit_lookback": 0,
+    "take_profit_pct": 0.05,
+    "stop_loss_pct": 0.1,
+    "max_hold_bars": 720,
+    "trailing_stop": true,
+    "profit_lock": {
+      "enabled": false,
+      "activate_profit_pct": 0.2,
+      "giveback_ratio": 0.8,
+      "trailing_atr_multiplier": 0.0,
+      "atr_period": 14,
+      "min_hold_bars_before_lock": 0
+    },
+    "mature_trend_exit": {
+      "enabled": true,
+      "activate_mfe_pct": 1.2,
+      "daily_ema_period": 20,
+      "use_completed_daily_bar": true,
+      "min_hold_bars_before_exit": 0
+    },
+    "bear_cooldown": {
+      "enabled": true,
+      "loss_streak": 2,
+      "cooldown_bars": 864,
+      "scope": "bear_entry_trades"
+    }
+  },
+  "retest_candidate_params": {
+    "entry_lookback": 375,
+    "bollinger_window": 375,
+    "bollinger_std_dev": 1.5,
+    "retest_window_bars": 96,
+    "retest_tolerance_pct": 0.005,
+    "retest_entry_delay_bars": 1,
+    "retest_require_bollinger_confirmation": true
+  },
+  "research_metrics": {
+    "source_report": "v22_bbm375_1p5_retest_nextopen_research_20260621_report.md",
+    "full_2600d_return_pct": 25705.8,
+    "full_2600d_max_drawdown_pct": -32.4,
+    "oos_2600d_return_pct": 904.3,
+    "oos_2600d_max_drawdown_pct": -14.7,
+    "s2_return_pct": 53.4,
+    "s2_max_drawdown_pct": -32.4,
+    "notes": "Research replay used a next-open execution model. The generic StrategyEvaluator is close-price based; this strategy emits the retest entry signal one completed bar after confirmation so live execution can happen after the confirmation candle closes. Exact next-open backtest accounting needs an open-price-aware evaluator."
+  },
+  "bull": {
+    "candidate": "U4_cons3_MTG_BB375_1p5_RETEST_W96_T50BP_NEXT",
+    "description": "375/432 long-only; daily close below EMA50 for 3 completed days disables/closes long; mature trend guard overlay; requires BBm375/1.5 breakout confirmation plus Donchian retest w96/tol50bp/BB still valid.",
+    "strategy_params": {
+      "entry_lookback": 375,
+      "min_hold_bars": 432,
+      "enable_long": true,
+      "enable_short": false,
+      "bollinger_breakout_enabled": true,
+      "bollinger_window": 375,
+      "bollinger_std_dev": 1.5,
+      "retest_enabled": true,
+      "retest_window_bars": 96,
+      "retest_tolerance_pct": 0.005,
+      "retest_entry_delay_bars": 1,
+      "retest_require_bollinger_confirmation": true
+    },
+    "permission": {
+      "allow_long": true,
+      "allow_short": false,
+      "close_below_ema_disables_long": true,
+      "ema_fast": 50,
+      "consecutive_below_ema_days": 3
+    }
+  },
+  "bear": {
+    "candidate": "K0_base_MTG_BCD1_BB375_1p5_RETEST_W96_T50BP_NEXT",
+    "description": "375/432 dual with mature trend guard and BEAR cooldown after two consecutive losing BEAR-entry trades; requires BBm375/1.5 breakout confirmation plus Donchian retest w96/tol50bp/BB still valid.",
+    "strategy_params": {
+      "entry_lookback": 375,
+      "min_hold_bars": 432,
+      "enable_long": true,
+      "enable_short": true,
+      "bollinger_breakout_enabled": true,
+      "bollinger_window": 375,
+      "bollinger_std_dev": 1.5,
+      "retest_enabled": true,
+      "retest_window_bars": 96,
+      "retest_tolerance_pct": 0.005,
+      "retest_entry_delay_bars": 1,
+      "retest_require_bollinger_confirmation": true
+    },
+    "permission": {
+      "allow_long": true,
+      "allow_short": true
+    }
+  },
+  "neutral": {
+    "candidate": "N3_dir_MTG_BB375_1p5_RETEST_W96_T50BP_NEXT",
+    "description": "375/432 directional; long/short only when close and EMA50 slope agree; mature trend guard overlay; requires BBm375/1.5 breakout confirmation plus Donchian retest w96/tol50bp/BB still valid.",
+    "strategy_params": {
+      "entry_lookback": 375,
+      "min_hold_bars": 432,
+      "enable_long": true,
+      "enable_short": true,
+      "bollinger_breakout_enabled": true,
+      "bollinger_window": 375,
+      "bollinger_std_dev": 1.5,
+      "retest_enabled": true,
+      "retest_window_bars": 96,
+      "retest_tolerance_pct": 0.005,
+      "retest_entry_delay_bars": 1,
+      "retest_require_bollinger_confirmation": true
+    },
+    "permission": {
+      "allow_long": true,
+      "allow_short": true,
+      "directional_only": true,
+      "ema_fast": 50,
+      "ema_slope_days": 5
+    }
+  },
+  "expected_behavior_change": "Do not enter immediately on a v2.2+BB raw Donchian breakout. Create a pending breakout, wait up to 96 completed 5m bars for a 0.5% retest of the shifted Donchian breakout level, require the confirmation close to hold the breakout and remain outside the matching shifted BBm375/1.5 band, then emit the entry signal one bar later. Keep v2.2 regime permission, mature trend exit, and BEAR cooldown unchanged."
+}

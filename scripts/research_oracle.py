@@ -306,6 +306,7 @@ def _safe_execution_signals(signals: np.ndarray) -> np.ndarray:
 def _evaluate_signals(
     signals: np.ndarray,
     prices: np.ndarray,
+    position_sizes: Optional[np.ndarray] = None,
     commission: float = COMMISSION,
     slippage: float = SLIPPAGE,
 ) -> Dict[str, Any]:
@@ -315,7 +316,7 @@ def _evaluate_signals(
         commission=commission,
         slippage=slippage,
     )
-    score, metrics, trade_log = ev.evaluate(signals, prices)
+    score, metrics, trade_log = ev.evaluate(signals, prices, position_sizes=position_sizes)
 
     n_bars = len(signals)
     years = n_bars / BARS_PER_YEAR if n_bars > 0 else 0.01
@@ -344,6 +345,7 @@ def _compute_rolling_metrics(
     window_months: List[int],
     regimes: Optional[np.ndarray] = None,
     df: Optional[pd.DataFrame] = None,
+    position_sizes: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """Compute minimum metrics across rolling windows.
 
@@ -372,8 +374,9 @@ def _compute_rolling_metrics(
             end = start + window_bars
             win_signals = signals[start:end]
             win_prices = prices[start:end]
+            win_sizes = position_sizes[start:end] if position_sizes is not None else None
             ev = StrategyEvaluator(commission=COMMISSION, slippage=SLIPPAGE)
-            _, metrics, _ = ev.evaluate(win_signals, win_prices)
+            _, metrics, _ = ev.evaluate(win_signals, win_prices, position_sizes=win_sizes)
             ret = metrics.get("total_return", 0)
             sh = metrics.get("sharpe_ratio", 0)
 
@@ -448,13 +451,14 @@ def _compute_regime_breakdown(
 def _compute_fee_sensitivity(
     signals: np.ndarray,
     prices: np.ndarray,
+    position_sizes: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """Return at different fee levels."""
     result = {}
     for bps in FEE_LEVELS_BPS:
         fee = bps / 10000.0
         ev = StrategyEvaluator(commission=fee, slippage=SLIPPAGE)
-        _, metrics, _ = ev.evaluate(signals, prices)
+        _, metrics, _ = ev.evaluate(signals, prices, position_sizes=position_sizes)
         result[f"{bps}bp"] = round(float(metrics.get("total_return", 0)), 4)
     return result
 
@@ -462,13 +466,14 @@ def _compute_fee_sensitivity(
 def _compute_slippage_sensitivity(
     signals: np.ndarray,
     prices: np.ndarray,
+    position_sizes: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """Return at different slippage levels."""
     result = {}
     for bps in SLIPPAGE_LEVELS_BPS:
         slip = bps / 10000.0
         ev = StrategyEvaluator(commission=COMMISSION, slippage=slip)
-        _, metrics, _ = ev.evaluate(signals, prices)
+        _, metrics, _ = ev.evaluate(signals, prices, position_sizes=position_sizes)
         result[f"{bps}bp"] = round(float(metrics.get("total_return", 0)), 4)
     return result
 
@@ -495,11 +500,12 @@ def _compute_execution_parity(
     raw_signals: np.ndarray,
     safe_signals: np.ndarray,
     prices: np.ndarray,
+    position_sizes: Optional[np.ndarray] = None,
 ) -> float:
     """Correlation of equity curves: raw vs safe-execution."""
     ev = StrategyEvaluator(commission=COMMISSION, slippage=SLIPPAGE)
-    raw_equity, _ = ev.simulate(raw_signals, prices)
-    safe_equity, _ = ev.simulate(safe_signals, prices)
+    raw_equity, _ = ev.simulate(raw_signals, prices, position_sizes=position_sizes)
+    safe_equity, _ = ev.simulate(safe_signals, prices, position_sizes=position_sizes)
     min_len = min(len(raw_equity), len(safe_equity))
     if min_len < 2:
         return 0.0
@@ -513,10 +519,11 @@ def _compute_equity_correlation(
     signals_a: np.ndarray,
     signals_b: np.ndarray,
     prices: np.ndarray,
+    position_sizes_a: Optional[np.ndarray] = None,
 ) -> float:
     """Correlation of equity curves between two signal sets."""
     ev = StrategyEvaluator(commission=COMMISSION, slippage=SLIPPAGE)
-    eq_a, _ = ev.simulate(signals_a, prices)
+    eq_a, _ = ev.simulate(signals_a, prices, position_sizes=position_sizes_a)
     eq_b, _ = ev.simulate(signals_b, prices)
     min_len = min(len(eq_a), len(eq_b))
     if min_len < 2:
@@ -614,6 +621,41 @@ def _is_v21_checkpoint(checkpoint: Dict[str, Any]) -> bool:
     return is_regime_channel_breakout_checkpoint(checkpoint)
 
 
+def _position_sizes_from_config(
+    checkpoint: Dict[str, Any],
+    n_bars: int,
+    df: Optional[pd.DataFrame] = None,
+) -> Optional[np.ndarray]:
+    cfg = checkpoint.get("position_sizing")
+    if not isinstance(cfg, dict):
+        return None
+    mode = cfg.get("mode")
+    if mode == "fixed_fraction":
+        fraction = float(cfg.get("fixed_fraction", 1.0))
+        if not np.isfinite(fraction) or fraction < 0 or fraction > 1:
+            raise ValueError("position_sizing.fixed_fraction must be in [0, 1]")
+        return np.full(n_bars, fraction, dtype=float)
+    if mode == "close_drawdown_scale":
+        if df is None or "close" not in df.columns:
+            raise ValueError("close_drawdown_scale requires df.close")
+        base = float(cfg.get("base_fraction", 1.0))
+        reduced = float(cfg.get("reduced_fraction", base))
+        threshold = float(cfg.get("drawdown_threshold", 0.15))
+        lookback = int(cfg.get("lookback_bars", 2016))
+        for name, value in (("base_fraction", base), ("reduced_fraction", reduced)):
+            if not np.isfinite(value) or value < 0 or value > 1:
+                raise ValueError(f"position_sizing.{name} must be in [0, 1]")
+        if reduced > base:
+            raise ValueError("position_sizing.reduced_fraction must be <= base_fraction")
+        if not np.isfinite(threshold) or threshold <= 0:
+            raise ValueError("position_sizing.drawdown_threshold must be positive")
+        close = pd.to_numeric(df["close"], errors="coerce").ffill().to_numpy(dtype=float)
+        rolling_high = pd.Series(close).rolling(lookback, min_periods=1).max().to_numpy()
+        drawdown = close / (rolling_high + 1e-12) - 1.0
+        return np.where(drawdown <= -threshold, reduced, base).astype(float)
+    raise ValueError("unsupported position_sizing.mode")
+
+
 def run_oracle(
     checkpoint_path: Optional[str] = None,
     candidate_path: Optional[str] = None,
@@ -689,6 +731,9 @@ def run_oracle(
     # Split signals for IS/OOS
     signals_raw_is = signals_raw_full[:split_idx]
     signals_raw_oos = signals_raw_full[split_idx:]
+    position_sizes_full = _position_sizes_from_config(checkpoint, len(signals_raw_full), df_full)
+    position_sizes_is = position_sizes_full[:split_idx] if position_sizes_full is not None else None
+    position_sizes_oos = position_sizes_full[split_idx:] if position_sizes_full is not None else None
 
     # --- Phase 3B: candidate-selectable filter ---
     if _filter_config is not None:
@@ -720,29 +765,33 @@ def run_oracle(
     prices_oos = df_oos["close"].values.astype(float)
     prices_full = np.concatenate([prices_is, prices_oos])
 
-    is_raw = _evaluate_signals(signals_raw_is, prices_is)
-    is_safe = _evaluate_signals(signals_safe_is, prices_is)
-    is_regime = _evaluate_signals(signals_regime_is, prices_is)
+    is_raw = _evaluate_signals(signals_raw_is, prices_is, position_sizes=position_sizes_is)
+    is_safe = _evaluate_signals(signals_safe_is, prices_is, position_sizes=position_sizes_is)
+    is_regime = _evaluate_signals(signals_regime_is, prices_is, position_sizes=position_sizes_is)
 
     # --- Evaluate OOS ---
-    oos_raw = _evaluate_signals(signals_raw_oos, prices_oos)
-    oos_safe = _evaluate_signals(signals_safe_oos, prices_oos)
-    oos_regime = _evaluate_signals(signals_regime_oos, prices_oos)
+    oos_raw = _evaluate_signals(signals_raw_oos, prices_oos, position_sizes=position_sizes_oos)
+    oos_safe = _evaluate_signals(signals_safe_oos, prices_oos, position_sizes=position_sizes_oos)
+    oos_regime = _evaluate_signals(signals_regime_oos, prices_oos, position_sizes=position_sizes_oos)
 
     # --- Rolling metrics (full data, pre-computed regimes) ---
     rolling = _compute_rolling_metrics(
         signals_raw_full, prices_full, ROLLING_WINDOW_MONTHS,
-        regimes=regimes_full, df=df_full,
+        regimes=regimes_full, df=df_full, position_sizes=position_sizes_full,
     )
 
     # --- Regime breakdown (pre-computed regimes) ---
     regime_breakdown = _compute_regime_breakdown(signals_raw_full, prices_full, regimes_full)
 
     # --- Fee / slippage sensitivity (IS + OOS) ---
-    fee_sens = _compute_fee_sensitivity(signals_raw_is, prices_is)
-    fee_sens_oos = _compute_fee_sensitivity(signals_raw_oos, prices_oos)
-    slippage_sens = _compute_slippage_sensitivity(signals_raw_is, prices_is)
-    slippage_sens_oos = _compute_slippage_sensitivity(signals_raw_oos, prices_oos)
+    fee_sens = _compute_fee_sensitivity(signals_raw_is, prices_is, position_sizes=position_sizes_is)
+    fee_sens_oos = _compute_fee_sensitivity(signals_raw_oos, prices_oos, position_sizes=position_sizes_oos)
+    slippage_sens = _compute_slippage_sensitivity(
+        signals_raw_is, prices_is, position_sizes=position_sizes_is
+    )
+    slippage_sens_oos = _compute_slippage_sensitivity(
+        signals_raw_oos, prices_oos, position_sizes=position_sizes_oos
+    )
 
     # --- vs Baseline correlation ---
     # If evaluating baseline itself, compute same-vs-same for documentation
@@ -754,7 +803,8 @@ def run_oracle(
             baseline_ckpt = _load_baseline_params()
             baseline_signals = _generate_v21_signals(baseline_ckpt, df_full)
             corr_vs_v21 = _compute_equity_correlation(
-                signals_raw_full, baseline_signals, prices_full
+                signals_raw_full, baseline_signals, prices_full,
+                position_sizes_a=position_sizes_full,
             )
         else:
             corr_vs_v21 = None
@@ -765,7 +815,9 @@ def run_oracle(
     }
 
     # --- Execution parity ---
-    execution_parity = _compute_execution_parity(signals_raw_oos, signals_safe_oos, prices_oos)
+    execution_parity = _compute_execution_parity(
+        signals_raw_oos, signals_safe_oos, prices_oos, position_sizes=position_sizes_oos
+    )
 
     # --- Flags (baseline gets known_risks, not disqualifications) ---
     flags = _compute_flags(
@@ -845,6 +897,7 @@ def run_oracle(
             "fast_days": fast_days,
             "slow_days": slow_days,
         },
+        "position_sizing": checkpoint.get("position_sizing"),
     }
     result["baseline_id"] = BASELINE_ID
     result["split_id"] = SPLIT_ID

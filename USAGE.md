@@ -183,3 +183,11 @@ autoresearch-crypto/
 ├── search_results/          # 搜索报告
 └── USAGE.md                 # 本文档
 ```
+
+## 9. 打包迁移
+
+从仓库根目录打包可迁移运行包（保留源码/配置/锁文件/checkpoints，排除本机环境、数据、缓存、日志、研究产物和 `.env`）:
+
+```powershell
+tar --exclude='./.venv' --exclude='./data' --exclude='./research_workspace' --exclude='./.git' --exclude='./.codegraph' --exclude='./.pytest_cache' --exclude='./.pytest_tmp' --exclude='./.ruff_cache' --exclude='./.uv-cache' --exclude='./__pycache__' --exclude='./logs' --exclude='./reflection_logs' --exclude='./search_results' --exclude='./reports' --exclude='./tmp_*' --exclude='./.env' -czf "..\autoresearch-crypto-runtime-$(Get-Date -Format yyyyMMdd-HHmmss).tar.gz" .
+```

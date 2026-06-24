@@ -539,21 +539,15 @@ def generate_signals(df):
 
     def test_llm_generate_with_mock_response(self, monkeypatch):
         """Mock LLM API call returns valid JSON -> accepted candidate."""
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake-key")
-
-        mock_resp = self._mock_anthropic_response(self.VALID_LLM_RESPONSE)
-
-        import urllib.request
+        monkeypatch.setenv("LLM_API_KEY", "sk-test-fake-key")
+        monkeypatch.setattr(
+            "scripts.llm_client.call_llm",
+            lambda *args, **kwargs: self.VALID_LLM_RESPONSE,
+        )
 
         import scripts.generate_code_candidate as gcc
 
-        original_urlopen = urllib.request.urlopen
-        try:
-            urllib.request.urlopen = lambda *a, **kw: mock_resp
-
-            result = gcc.generate_code_candidate(mock=False)
-        finally:
-            urllib.request.urlopen = original_urlopen
+        result = gcc.generate_code_candidate(mock=False)
 
         assert result["status"] == "accepted", (
             f"Expected accepted, got {result['status']}: {result.get('errors', [])}"
@@ -576,21 +570,15 @@ def generate_signals(df):
 
     def test_llm_non_json_response_rejected(self, monkeypatch):
         """LLM returns non-JSON text -> generate_failed, not evaluated."""
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake-key")
-
-        mock_resp = self._mock_anthropic_response(self.NON_JSON_RESPONSE_TEXT)
-
-        import urllib.request
+        monkeypatch.setenv("LLM_API_KEY", "sk-test-fake-key")
+        monkeypatch.setattr(
+            "scripts.llm_client.call_llm",
+            lambda *args, **kwargs: self.NON_JSON_RESPONSE_TEXT,
+        )
 
         import scripts.generate_code_candidate as gcc
 
-        original_urlopen = urllib.request.urlopen
-        try:
-            urllib.request.urlopen = lambda *a, **kw: mock_resp
-
-            result = gcc.generate_code_candidate(mock=False)
-        finally:
-            urllib.request.urlopen = original_urlopen
+        result = gcc.generate_code_candidate(mock=False)
 
         assert result["status"] == "generate_failed", (
             f"Expected generate_failed, got {result['status']}"
@@ -600,9 +588,76 @@ def generate_signals(df):
             f"Error should mention JSON parsing, got: {result['errors']}"
         )
 
+    def test_parser_repairs_raw_multiline_strategy_code(self):
+        """LLM may return raw multiline code inside strategy_code."""
+        from scripts.generate_code_candidate import _parse_llm_json
+
+        response = """{
+  "strategy_code": "import numpy as np
+def generate_signals(df):
+    return np.zeros(len(df), dtype=np.int8)
+",
+  "manifest": {
+    "strategy_name": "raw_multiline",
+    "hypothesis": "Testing parser repair.",
+    "description": "Raw multiline strategy_code should parse.",
+    "params": {}
+  }
+}"""
+
+        parsed = _parse_llm_json(response)
+
+        assert "def generate_signals" in parsed["strategy_code"]
+        assert parsed["manifest"]["strategy_name"] == "raw_multiline"
+
+    def test_parser_repairs_raw_multiline_manifest_fields(self):
+        """LLM may also wrap manifest strings across raw lines."""
+        from scripts.generate_code_candidate import _parse_llm_json
+
+        response = """{
+  "strategy_code": "import numpy as np
+def generate_signals(df):
+    return np.zeros(len(df), dtype=np.int8)
+",
+  "manifest": {
+    "strategy_name": "raw_manifest",
+    "hypothesis": "First line
+second line",
+    "description": "Description line
+continued",
+    "params": {}
+  }
+}"""
+
+        parsed = _parse_llm_json(response)
+
+        assert parsed["manifest"]["hypothesis"] == "First line\nsecond line"
+        assert parsed["manifest"]["description"] == "Description line\ncontinued"
+
+    def test_parser_does_not_double_escape_valid_strategy_code(self):
+        """Repairing manifest text must not turn escaped code newlines into literal backslashes."""
+        from scripts.generate_code_candidate import _parse_llm_json
+
+        response = """{
+  "strategy_code": "import numpy as np\\ndef generate_signals(df):\\n    return np.zeros(len(df), dtype=np.int8)\\n",
+  "manifest": {
+    "strategy_name": "escaped_code_raw_manifest",
+    "hypothesis": "Testing parser repair.",
+    "description": "Description line
+continued",
+    "params": {}
+  }
+}"""
+
+        parsed = _parse_llm_json(response)
+
+        assert parsed["strategy_code"].startswith("import numpy as np\n")
+        assert "\\n" not in parsed["strategy_code"]
+        assert parsed["manifest"]["description"] == "Description line\ncontinued"
+
     def test_llm_forbidden_import_rejected(self, monkeypatch):
         """LLM returns code with 'import os' -> rejected by static scan."""
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake-key")
+        monkeypatch.setenv("LLM_API_KEY", "sk-test-fake-key")
 
         bad_response = json.dumps(
             {
@@ -615,19 +670,11 @@ def generate_signals(df):
                 },
             }
         )
-        mock_resp = self._mock_anthropic_response(bad_response)
-
-        import urllib.request
+        monkeypatch.setattr("scripts.llm_client.call_llm", lambda *args, **kwargs: bad_response)
 
         import scripts.generate_code_candidate as gcc
 
-        original_urlopen = urllib.request.urlopen
-        try:
-            urllib.request.urlopen = lambda *a, **kw: mock_resp
-
-            result = gcc.generate_code_candidate(mock=False)
-        finally:
-            urllib.request.urlopen = original_urlopen
+        result = gcc.generate_code_candidate(mock=False)
 
         assert result["status"] == "rejected", f"Expected rejected, got {result['status']}"
         error_text = " ".join(str(e) for e in result.get("errors", []))
@@ -636,11 +683,10 @@ def generate_signals(df):
         )
 
     def test_llm_api_key_missing(self, monkeypatch):
-        """No ANTHROPIC_API_KEY -> generate_failed, not accepted."""
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-
+        """No LLM API key -> generate_failed, not accepted."""
         import scripts.generate_code_candidate as gcc
 
+        monkeypatch.setattr(gcc, "_has_llm_api_key", lambda: False)
         result = gcc.generate_code_candidate(mock=False)
 
         assert result["status"] == "generate_failed", (

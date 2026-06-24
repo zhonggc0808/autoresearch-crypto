@@ -111,8 +111,17 @@ def _now_iso() -> str:
 
 def _next_codegen_id() -> str:
     """Generate next codegen candidate ID."""
+    import re
+
     CODGEN_DIR.mkdir(parents=True, exist_ok=True)
     existing = [d.name for d in CODGEN_DIR.iterdir() if d.is_dir() and d.name.startswith("exp_")]
+    if LLM_CANDIDATES_DIR.exists():
+        existing.extend(f.stem for f in LLM_CANDIDATES_DIR.glob("exp_*.json"))
+    if REJECTED_DIR.exists():
+        for f in REJECTED_DIR.glob("*exp_*.json"):
+            match = re.search(r"(exp_\d+)", f.stem)
+            if match:
+                existing.append(match.group(1))
     nums = []
     for name in existing:
         try:
@@ -269,7 +278,7 @@ def _load_prompt_text() -> str:
 
 
 def _generate_via_llm() -> tuple:
-    """Call the Anthropic API to generate strategy code and manifest.
+    """Call the configured LLM API to generate strategy code and manifest.
 
     Returns (strategy_code, manifest) on success.
     Returns (None, error_message) on any failure.
@@ -278,70 +287,39 @@ def _generate_via_llm() -> tuple:
     signal encoding rules, and output JSON schema. No project internals
     are exposed.
     """
-    import json
     import os
-    import urllib.error
-    import urllib.request
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
+    if not _has_llm_api_key():
         return None, (
-            "ANTHROPIC_API_KEY environment variable not set. "
+            "LLM_API_KEY or ANTHROPIC_API_KEY environment variable not set. "
             "Use --mock for testing without an API key."
         )
+
+    from scripts.llm_client import call_llm
 
     model = os.environ.get("CODEGEN_MODEL", "claude-sonnet-4-6")
     prompt_text = _load_prompt_text()
 
-    request_body = json.dumps(
-        {
-            "model": model,
-            "max_tokens": 4096,
-            "temperature": 0.7,
-            "system": "You are a strategy code generator. "
-            "Respond with valid JSON only, no markdown fences, no explanations.",
-            "messages": [
-                {"role": "user", "content": prompt_text},
-            ],
-        }
-    ).encode("utf-8")
+    response_text = ""
+    for attempt in range(3):
+        try:
+            response_text = call_llm(
+                system_prompt=(
+                    "You are a strategy code generator. Respond with valid JSON only, "
+                    "no markdown fences, no explanations."
+                ),
+                user_message=prompt_text,
+                model=model,
+                max_tokens=8192,
+                temperature=0.7 if attempt == 0 else 0.2,
+            )
+        except Exception as e:
+            return None, f"LLM call failed: {e}"
+        if response_text:
+            break
 
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-
-    try:
-        req = urllib.request.Request(
-            "https://api.anthropic.com/v1/messages",
-            data=request_body,
-            headers=headers,
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            response_data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        detail = _extract_api_error(e)
-        return None, f"Anthropic API HTTP {e.code}: {detail}"
-    except urllib.error.URLError as e:
-        return None, f"API connection failed: {e.reason}"
-    except json.JSONDecodeError as e:
-        return None, f"API returned non-JSON response: {e}"
-    except Exception as e:
-        return None, f"API request failed: {e}"
-
-    # Extract text content from response
-    try:
-        content_blocks = response_data.get("content", [])
-        response_text = ""
-        for block in content_blocks:
-            if block.get("type") == "text":
-                response_text += block.get("text", "")
-        if not response_text:
-            return None, "LLM returned empty response"
-    except (KeyError, IndexError, TypeError) as e:
-        return None, f"Unexpected API response structure: {e}"
+    if not response_text:
+        return None, "LLM returned empty response"
 
     # Parse JSON from response (strip markdown fences if present)
     try:
@@ -362,6 +340,15 @@ def _generate_via_llm() -> tuple:
         manifest["strategy_name"] = manifest.pop("name")
 
     return strategy_code, manifest
+
+
+def _has_llm_api_key() -> bool:
+    """Return whether a configured LLM API key is available."""
+    import os
+
+    import scripts.llm_client  # noqa: F401 - loads .env for key detection
+
+    return bool(os.environ.get("LLM_API_KEY") or os.environ.get("ANTHROPIC_API_KEY"))
 
 
 def _extract_api_error(http_error: Any) -> str:
@@ -398,7 +385,74 @@ def _parse_llm_json(response_text: str) -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError as e:
+        repaired = _repair_common_raw_json_strings(text)
+        if repaired is not None:
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError:
+                pass
         raise ValueError(f"LLM response is not valid JSON: {e}\nResponse preview: {text[:300]}")
+
+
+def _repair_common_raw_json_strings(text: str) -> str | None:
+    """Repair common raw multiline strings in codegen JSON output."""
+    repaired = _repair_raw_strategy_code_json(text) or text
+    for field, followers in (
+        ("hypothesis", ("description", "expected_behavior_change", "params")),
+        ("description", ("expected_behavior_change", "params")),
+        ("expected_behavior_change", ("params",)),
+    ):
+        repaired = _repair_raw_string_field_before_keys(repaired, field, followers) or repaired
+    return repaired if repaired != text else None
+
+
+def _repair_raw_strategy_code_json(text: str) -> str | None:
+    """Repair the common case where only strategy_code is a raw multiline string."""
+    import json
+    import re
+
+    start_match = re.search(r'("strategy_code"\s*:\s*")', text)
+    if not start_match:
+        return None
+    code_start = start_match.end()
+    tail_match = re.search(r'"\s*,\s*"manifest"\s*:', text[code_start:], re.DOTALL)
+    if not tail_match:
+        return None
+
+    code_end = code_start + tail_match.start()
+    raw_code = text[code_start:code_end]
+    if "\n" not in raw_code:
+        return None
+    escaped_code = json.dumps(raw_code)[1:-1]
+    return text[:code_start] + escaped_code + text[code_end:]
+
+
+def _repair_raw_string_field_before_keys(
+    text: str,
+    field: str,
+    followers: tuple[str, ...],
+) -> str | None:
+    """Repair a raw multiline string field that appears before known next keys."""
+    import json
+    import re
+
+    start_match = re.search(rf'("{re.escape(field)}"\s*:\s*")', text)
+    if not start_match:
+        return None
+    value_start = start_match.end()
+    follower_pattern = "|".join(re.escape(key) for key in followers)
+    tail_match = re.search(
+        rf'"\s*,\s*"({follower_pattern})"\s*:',
+        text[value_start:],
+        re.DOTALL,
+    )
+    if not tail_match:
+        return None
+
+    value_end = value_start + tail_match.start()
+    raw_value = text[value_start:value_end]
+    escaped_value = json.dumps(raw_value)[1:-1]
+    return text[:value_start] + escaped_value + text[value_end:]
 
 
 def _generate(
@@ -494,14 +548,12 @@ def _write_rejection(
 
 def _resolve_mock_default(cli_mock: bool) -> bool:
     """Resolve mock mode: CLI flag wins, else auto-detect from API key."""
-    import os
-
     if cli_mock:
         return True
-    if os.environ.get("ANTHROPIC_API_KEY"):
+    if _has_llm_api_key():
         return False
-    print("  [INFO] No ANTHROPIC_API_KEY set. Defaulting to --mock.")
-    print("  [INFO] Set ANTHROPIC_API_KEY (or CODEGEN_MODEL) for real LLM generation.")
+    print("  [INFO] No LLM_API_KEY or ANTHROPIC_API_KEY set. Defaulting to --mock.")
+    print("  [INFO] Set LLM_API_KEY (or CODEGEN_MODEL) for real LLM generation.")
     return True
 
 

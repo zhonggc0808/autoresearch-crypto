@@ -10,7 +10,9 @@ Usage:
 import argparse
 import math
 import os
+import re
 import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -22,6 +24,7 @@ from dex.checkpoints import (
 from dex.config import (
     COMMISSION,
     INITIAL_CAPITAL,
+    PROJECT_DIR,
     SLIPPAGE,
 )
 from dex.data import list_crypto_files, load_crypto_data
@@ -337,6 +340,72 @@ def build_market_intel_position_sizes(
     return position_sizes, stats
 
 
+def _bar_datetimes(df: pd.DataFrame) -> pd.Series:
+    if "datetime" in df.columns:
+        return pd.to_datetime(df["datetime"], errors="coerce")
+    raw = df["timestamp"]
+    unit = "ms" if float(np.nanmax(np.abs(raw.to_numpy(dtype=float)))) > 10_000_000_000 else "s"
+    return pd.to_datetime(raw, unit=unit, errors="coerce")
+
+
+def _funding_day_tag(path: Path) -> int:
+    match = re.search(r"_(\d+)d\.parquet$", path.name)
+    return int(match.group(1)) if match else -1
+
+
+def _find_funding_file(symbol: str, days: int = 0, root: Path | None = None) -> Path | None:
+    root = root or PROJECT_DIR / "data" / "market_intel"
+    candidates = sorted(root.glob(f"{symbol.upper()}*derivatives*.parquet"))
+    if not candidates:
+        return None
+    if days > 0:
+        exact = [path for path in candidates if _funding_day_tag(path) == days]
+        if exact:
+            return exact[-1]
+        covering = [path for path in candidates if _funding_day_tag(path) >= days]
+        if covering:
+            return min(covering, key=_funding_day_tag)
+    return max(candidates, key=_funding_day_tag)
+
+
+def _funding_range(path: str | Path) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    funding = pd.read_parquet(path) if str(path).endswith(".parquet") else pd.read_csv(path)
+    if "available_at" not in funding.columns:
+        return None
+    times = pd.to_datetime(funding["available_at"], errors="coerce").dropna()
+    if times.empty:
+        return None
+    return times.min(), times.max()
+
+
+def add_funding_events(df: pd.DataFrame, funding_path: str | Path) -> tuple[pd.DataFrame, int]:
+    funding = (
+        pd.read_parquet(funding_path)
+        if str(funding_path).endswith(".parquet")
+        else pd.read_csv(funding_path)
+    )
+    if "available_at" not in funding.columns or "funding_rate" not in funding.columns:
+        raise ValueError("funding data must contain available_at and funding_rate")
+
+    events = funding[["available_at", "funding_rate"]].copy()
+    events["available_at"] = pd.to_datetime(events["available_at"], errors="coerce")
+    events["funding_rate"] = pd.to_numeric(events["funding_rate"], errors="coerce")
+    events = events.dropna().sort_values("available_at")
+    events = events[events["funding_rate"].ne(events["funding_rate"].shift())]
+
+    out = df.copy()
+    out["funding_rate"] = 0.0
+    bar_times = _bar_datetimes(out).to_numpy()
+    event_times = events["available_at"].to_numpy()
+    indexes = np.searchsorted(bar_times, event_times, side="left")
+    count = 0
+    for idx, rate in zip(indexes, events["funding_rate"].to_numpy()):
+        if 0 <= idx < len(out):
+            out.at[int(idx), "funding_rate"] += float(rate)
+            count += 1
+    return out, count
+
+
 def main():
     parser = argparse.ArgumentParser(description="布林带均值回归 Walk-Forward 回测")
     parser.add_argument("--symbol", type=str, default="BTCUSDT", help="交易对")
@@ -428,6 +497,13 @@ def main():
         default=42,
         help="market-intel 随机对照 seed，默认42",
     )
+    parser.add_argument(
+        "--funding-data",
+        type=str,
+        default=None,
+        help="资金费率事件 CSV/Parquet；默认自动找 data/market_intel/*derivatives*.parquet",
+    )
+    parser.add_argument("--no-funding", action="store_true", help="关闭资金费率扣减")
     args = parser.parse_args()
 
     # 加载策略参数
@@ -470,6 +546,26 @@ def main():
     n_bars = args.days * 288
     if len(df) > n_bars:
         df = df.iloc[-n_bars:].reset_index(drop=True)
+    if not args.no_funding:
+        funding_path = (
+            Path(args.funding_data)
+            if args.funding_data
+            else _find_funding_file(args.symbol, args.days)
+        )
+        if funding_path and funding_path.exists():
+            funding_range = _funding_range(funding_path)
+            bar_times = _bar_datetimes(df)
+            if funding_range and (
+                funding_range[0] > bar_times.min() or funding_range[1] < bar_times.max()
+            ):
+                print(
+                    "警告: funding 数据未覆盖完整回测区间 "
+                    f"({funding_range[0]} ~ {funding_range[1]})"
+                )
+            df, funding_events = add_funding_events(df, funding_path)
+            print(f"资金费率: 已载入 {funding_events} 个事件 ({funding_path})")
+        else:
+            print("警告: 未找到资金费率数据；本次回测不会扣 funding")
     print(f"数据量: {len(df)} 条K线, 价格范围: {df['close'].min():.2f} - {df['close'].max():.2f}")
     print()
 
@@ -528,6 +624,7 @@ def main():
     )
     score, metrics, trades = evaluator.evaluate(valid_signals, prices, valid_df)
     n_trades = len([t for t in trades if t.get("pnl") is not None])
+    funding_pnl = sum(float(t.get("funding_pnl", 0.0)) for t in trades)
     overlay_score = None
     overlay_metrics = None
     overlay_trades = None
@@ -575,6 +672,8 @@ def main():
     print(f"最终权益:    {INITIAL_CAPITAL * (1 + metrics['total_return']):.2f} USDT")
     print(f"综合评分:    {score:.4f}")
     print(f"总收益率:    {metrics['total_return'] * 100:.2f}%")
+    if "funding_rate" in valid_df.columns:
+        print(f"资金费率PnL: {funding_pnl:+.2f} USDT")
     print(f"年化收益率:  {metrics['annualized_return'] * 100:.2f}%")
     print(f"年化波动率:  {metrics['annualized_vol'] * 100:.2f}%")
     print(f"夏普比率:    {metrics['sharpe_ratio']:.4f}")

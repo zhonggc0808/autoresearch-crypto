@@ -52,6 +52,46 @@ def test_half_size_entry_freezes_for_existing_position() -> None:
     assert equity[-1] == 150.0
 
 
+def test_funding_rate_debits_long_and_credits_short() -> None:
+    evaluator = StrategyEvaluator(initial_capital=100.0, commission=0.0, slippage=0.0)
+    df = pd.DataFrame({"funding_rate": [0.0, 0.01, 0.0]})
+
+    long_equity, long_trades = evaluator.simulate(
+        np.array([2, 1, 0]), np.array([100.0, 100.0, 100.0]), df=df
+    )
+    short_equity, short_trades = evaluator.simulate(
+        np.array([3, 1, 0]), np.array([100.0, 100.0, 100.0]), df=df
+    )
+
+    assert long_equity[-1] == pytest.approx(99.0)
+    assert long_trades[-1]["funding_pnl"] == pytest.approx(-1.0)
+    assert short_equity[-1] == pytest.approx(101.0)
+    assert short_trades[-1]["funding_pnl"] == pytest.approx(1.0)
+
+
+def test_stop_config_funding_rate_debits_long_and_credits_short() -> None:
+    evaluator = StrategyEvaluator(initial_capital=100.0, commission=0.0, slippage=0.0)
+    df = pd.DataFrame({"funding_rate": [0.0, 0.01, 0.0]})
+
+    long_equity, long_trades = evaluator.simulate(
+        np.array([2, 1, 0]),
+        np.array([100.0, 100.0, 100.0]),
+        df=df,
+        stop_config={"base_size": 1.0},
+    )
+    short_equity, short_trades = evaluator.simulate(
+        np.array([3, 1, 0]),
+        np.array([100.0, 100.0, 100.0]),
+        df=df,
+        stop_config={"base_size": 1.0},
+    )
+
+    assert long_equity[-1] == pytest.approx(99.0)
+    assert long_trades[-1]["funding_pnl"] == pytest.approx(-1.0)
+    assert short_equity[-1] == pytest.approx(101.0)
+    assert short_trades[-1]["funding_pnl"] == pytest.approx(1.0)
+
+
 def test_zero_size_does_not_force_close_existing_position() -> None:
     evaluator = StrategyEvaluator(initial_capital=100.0, commission=0.0, slippage=0.0)
 
@@ -108,6 +148,104 @@ def test_simulate_short_close_event_has_entry_and_exit_fields() -> None:
     assert cover["entry_price"] == 100.0
     assert cover["exit_price"] == 90.0
     assert cover["entry_notional"] == 100.0
+
+
+def test_signal_bar_open_execution_uses_open_for_trades_and_close_for_marking() -> None:
+    evaluator = StrategyEvaluator(
+        initial_capital=100.0,
+        commission=0.0,
+        slippage=0.0,
+        execution_price="signal_bar_open",
+    )
+    df = pd.DataFrame({"open": [90.0, 180.0]})
+
+    equity, trades = evaluator.simulate(np.array([2, 0]), np.array([100.0, 200.0]), df=df)
+
+    assert equity[0] == pytest.approx(100.0 / 90.0 * 100.0)
+    assert equity[-1] == pytest.approx(200.0)
+    assert trades[0]["entry_price"] == 90.0
+    assert trades[1]["exit_price"] == 180.0
+
+
+def test_signal_bar_open_execution_requires_open_column() -> None:
+    evaluator = StrategyEvaluator(execution_price="signal_bar_open")
+
+    with pytest.raises(ValueError, match="open column"):
+        evaluator.simulate(np.array([2, 0]), np.array([100.0, 110.0]))
+
+
+def test_mixed_retest_open_without_hints_matches_close_execution() -> None:
+    df = pd.DataFrame({"open": [90.0, 180.0]})
+    signals = np.array([2, 0])
+    prices = np.array([100.0, 200.0])
+    close_ev = StrategyEvaluator(initial_capital=100.0, commission=0.0, slippage=0.0)
+    mixed_ev = StrategyEvaluator(
+        initial_capital=100.0,
+        commission=0.0,
+        slippage=0.0,
+        execution_price="mixed_retest_open",
+    )
+
+    close_equity, close_trades = close_ev.simulate(signals, prices, df=df)
+    mixed_equity, mixed_trades = mixed_ev.simulate(signals, prices, df=df)
+
+    assert mixed_equity.tolist() == close_equity.tolist()
+    assert mixed_trades == close_trades
+
+
+def test_mixed_retest_open_only_scheduled_entry_uses_open() -> None:
+    evaluator = StrategyEvaluator(
+        initial_capital=100.0,
+        commission=0.0,
+        slippage=0.0,
+        execution_price="mixed_retest_open",
+    )
+    df = pd.DataFrame({"open": [90.0, 180.0]})
+
+    equity, trades = evaluator.simulate(
+        np.array([2, 0]),
+        np.array([100.0, 200.0]),
+        df=df,
+        execution_hints=np.array(["scheduled_entry_executed", "normal_exit"]),
+    )
+
+    assert equity[0] == pytest.approx(100.0 / 90.0 * 100.0)
+    assert equity[-1] == pytest.approx(200.0 / 90.0 * 100.0)
+    assert trades[0]["entry_price"] == 90.0
+    assert trades[1]["exit_price"] == 200.0
+
+
+def test_mixed_retest_open_blocks_hold_reentry_from_flat() -> None:
+    evaluator = StrategyEvaluator(
+        initial_capital=100.0,
+        commission=0.0,
+        slippage=0.0,
+        execution_price="mixed_retest_open",
+    )
+    df = pd.DataFrame({"open": [90.0, 180.0, 190.0]})
+
+    equity, trades = evaluator.simulate(
+        np.array([2, 2, 0]),
+        np.array([100.0, 200.0, 210.0]),
+        df=df,
+        execution_hints=np.array(["hold_long", "", "normal_exit"]),
+    )
+
+    assert equity.tolist() == [100.0, 100.0, 100.0]
+    assert trades == []
+
+
+def test_mixed_retest_open_rejects_scheduled_entry_while_position_exists() -> None:
+    evaluator = StrategyEvaluator(execution_price="mixed_retest_open")
+    df = pd.DataFrame({"open": [100.0, 100.0]})
+
+    with pytest.raises(ValueError, match="scheduled_entry_executed"):
+        evaluator.simulate(
+            np.array([2, 3]),
+            np.array([100.0, 100.0]),
+            df=df,
+            execution_hints=np.array(["scheduled_entry_executed", "scheduled_entry_executed"]),
+        )
 
 
 def test_stop_config_base_size_controls_entries() -> None:

@@ -334,6 +334,33 @@ def test_live_bitget_insufficient_margin_halts_and_notifies(monkeypatch) -> None
     assert notices[0][0] == "Bitget保证金不足，程序已停止"
 
 
+def test_live_bitget_open_fill_notify_helper(monkeypatch) -> None:
+    module = importlib.import_module("live_bitget_quant")
+    notices = []
+    monkeypatch.setattr(
+        module,
+        "notify_trade_action",
+        lambda action, **kwargs: notices.append((action, kwargs)) or True,
+    )
+
+    state = {"notify_email_to": "ops@example.com", "mode_name": "live"}
+
+    assert module._notify_open_filled(state, "ETH/USDT:USDT", -1, 1729.17, 0.01)
+    assert notices == [
+        (
+            "OPEN_FILLED",
+            {
+                "notify_email_to": "ops@example.com",
+                "mode": "live",
+                "symbol": "ETH/USDT:USDT",
+                "direction": -1,
+                "price": 1729.17,
+                "size": 0.01,
+            },
+        )
+    ]
+
+
 def test_live_okx_empty_proxy_disables_proxy(monkeypatch) -> None:
     module = importlib.import_module("live_okx_quant")
     monkeypatch.setenv("OKX_API_KEY", "test-key")

@@ -10,10 +10,7 @@ Run:
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -178,6 +175,31 @@ class TestBuildCandidate:
         proposal["base"] = "v3.0_experimental"  # LLM tries to override
         candidate = _build_full_candidate("exp_9999", proposal)
         assert candidate["base"] == "v2.1_balanced"  # runner wins
+
+    def test_mature_trend_exit_defaults_are_injected(self):
+        from scripts.generate_candidate import _build_full_candidate
+        from scripts.validate_candidate_v08 import validate_candidate
+
+        proposal = json.loads(VALID_LLM_RESPONSE)
+        proposal["params"]["strategy_type"] = "exit_logic_channel_breakout"
+        proposal["params"]["exit_logic"] = {
+            "exit_lookback": 0,
+            "take_profit_pct": 0.20,
+            "stop_loss_pct": 0.12,
+            "max_hold_bars": 720,
+            "trailing_stop": True,
+            "mature_trend_exit": {
+                "activate_mfe_pct": 1.2,
+                "daily_ema_period": 20,
+            },
+        }
+
+        candidate = _build_full_candidate("exp_9993", proposal)
+        mature = candidate["params"]["exit_logic"]["mature_trend_exit"]
+        assert mature["enabled"] is True
+        assert mature["use_completed_daily_bar"] is True
+        assert candidate["strategy"] == "exit_logic_variant"
+        assert validate_candidate(candidate, check_uniqueness=False) == []
 
 
 # ===================================================================

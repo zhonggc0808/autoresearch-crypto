@@ -95,6 +95,7 @@ class StrategyEvaluator:
         initial_capital: float = INITIAL_CAPITAL,
         commission: float = COMMISSION,
         slippage: float = SLIPPAGE,
+        execution_price: str = "close",
     ) -> None:
         """Initialize the evaluator with capital and cost parameters.
 
@@ -102,10 +103,19 @@ class StrategyEvaluator:
             initial_capital: Starting capital (default from config).
             commission: Fee rate per trade (default from config).
             slippage: Slippage rate (default from config).
+            execution_price: ``close`` for legacy behavior, ``signal_bar_open``
+                to execute every position change at the signal bar open, or
+                ``mixed_retest_open`` to execute only scheduled retest entries
+                at the signal bar open.
         """
+        if execution_price not in {"close", "signal_bar_open", "mixed_retest_open"}:
+            raise ValueError(
+                "execution_price must be 'close', 'signal_bar_open', or 'mixed_retest_open'"
+            )
         self.initial_capital = initial_capital
         self.commission = commission
         self.slippage = slippage
+        self.execution_price = execution_price
 
     def simulate(
         self,
@@ -114,6 +124,7 @@ class StrategyEvaluator:
         df: pd.DataFrame | None = None,
         position_sizes: np.ndarray | None = None,
         stop_config: Dict[str, Any] | None = None,
+        execution_hints: np.ndarray | None = None,
     ) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
         """Simulate trading using signal and price arrays.
 
@@ -125,6 +136,7 @@ class StrategyEvaluator:
             df: Optional DataFrame (unused; kept for API compatibility).
             position_sizes: Optional per-bar entry size multipliers in [0, 1].
             stop_config: Optional Phase 2 risk overlay config.
+            execution_hints: Optional per-bar reason strings for mixed execution.
 
         Returns:
             A tuple ``(equity_curve, trades)`` where ``equity_curve`` is a
@@ -133,7 +145,22 @@ class StrategyEvaluator:
         """
         if len(signals) != len(prices):
             raise ValueError("signals and prices must have the same length")
+        open_prices = prices
+        if self.execution_price in {"signal_bar_open", "mixed_retest_open"}:
+            if df is None or "open" not in df.columns:
+                raise ValueError(f"execution_price={self.execution_price!r} requires df with an open column")
+            open_prices = df["open"].to_numpy(dtype=float)
+            if len(open_prices) != len(signals):
+                raise ValueError("df open column must match signals and prices length")
+        if execution_hints is None:
+            hints = np.full(len(signals), "", dtype=object)
+        else:
+            hints = np.asarray(execution_hints, dtype=object)
+            if len(hints) != len(signals):
+                raise ValueError("execution_hints must match signals and prices length")
         if stop_config is not None:
+            if self.execution_price != "close":
+                raise ValueError(f"execution_price={self.execution_price!r} is not supported with stop_config")
             return self._simulate_with_stop_config(signals, prices, df, position_sizes, stop_config)
         if position_sizes is None:
             size_multipliers = np.ones(len(signals), dtype=float)
@@ -157,11 +184,31 @@ class StrategyEvaluator:
         entry_price = 0.0
         entry_step = -1
         entry_size_multiplier = 0.0
+        blocked_hold_reentry = False
+        funding_pnl_since_entry = 0.0
+        funding_rates = np.zeros(len(signals), dtype=float)
+        if df is not None and "funding_rate" in df.columns:
+            funding_rates = (
+                pd.to_numeric(df["funding_rate"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+            )
+            if len(funding_rates) != len(signals):
+                raise ValueError("df funding_rate must match signals and prices length")
 
         for i in range(len(signals)):
             signal = signals[i]
             price = prices[i]
+            hint = str(hints[i])
+            if self.execution_price == "signal_bar_open":
+                exec_base_price = open_prices[i]
+            else:
+                exec_base_price = price
             size_multiplier = float(size_multipliers[i])
+            funding_rate = float(funding_rates[i])
+            if position != 0 and funding_rate != 0.0 and np.isfinite(funding_rate):
+                notional = abs(shares) * price
+                funding_cashflow = -position * notional * funding_rate
+                capital += funding_cashflow
+                funding_pnl_since_entry += funding_cashflow
 
             # Resolve signal to target position
             if signal == 2:
@@ -172,16 +219,39 @@ class StrategyEvaluator:
                 target_pos = 0
             else:
                 target_pos = position
+            if self.execution_price == "mixed_retest_open":
+                if target_pos == 0:
+                    blocked_hold_reentry = False
+                elif (
+                    position == 0
+                    and target_pos != 0
+                    and (
+                        hint in {"hold_long", "hold_short"}
+                        or (blocked_hold_reentry and hint != "scheduled_entry_executed")
+                    )
+                ):
+                    blocked_hold_reentry = True
+                    target_pos = 0
+                elif position != 0 and target_pos not in {0, position} and hint == "scheduled_entry_executed":
+                    raise ValueError("scheduled_entry_executed cannot open against an existing position")
 
             if target_pos != position:
+                mixed_open_entry = (
+                    self.execution_price == "mixed_retest_open"
+                    and position == 0
+                    and target_pos != 0
+                    and hint == "scheduled_entry_executed"
+                )
+                exec_base_price = open_prices[i] if mixed_open_entry else exec_base_price
                 # Close existing long position
                 if position == 1 and target_pos <= 0:
-                    exec_price = price * (1 - self.slippage)
+                    exec_price = exec_base_price * (1 - self.slippage)
                     gross = shares * exec_price
                     cost = gross * self.commission
                     proceeds = gross - cost
                     capital += proceeds
                     pnl = proceeds - entry_cost_basis
+                    pnl += funding_pnl_since_entry
                     trades.append(
                         {
                             "type": "sell",
@@ -192,18 +262,21 @@ class StrategyEvaluator:
                             "entry_price": float(entry_price),
                             "exit_price": float(exec_price),
                             "entry_notional": float(entry_cost_basis),
+                            "funding_pnl": float(funding_pnl_since_entry),
                         }
                     )
                     shares = 0.0
                     position = 0
+                    funding_pnl_since_entry = 0.0
 
                 # Close existing short position
                 elif position == -1 and target_pos >= 0:
-                    exec_price = price * (1 + self.slippage)
+                    exec_price = exec_base_price * (1 + self.slippage)
                     buy_cost = abs(shares) * exec_price
                     buy_cost_total = buy_cost * (1 + self.commission)
-                    pnl = entry_cost_basis - buy_cost_total
-                    capital = capital + pnl
+                    trading_pnl = entry_cost_basis - buy_cost_total
+                    pnl = trading_pnl + funding_pnl_since_entry
+                    capital = capital + trading_pnl
                     # Guard: prevent negative capital
                     if capital < 0:
                         capital = 0
@@ -217,21 +290,25 @@ class StrategyEvaluator:
                             "entry_price": float(entry_price),
                             "exit_price": float(exec_price),
                             "entry_notional": float(entry_cost_basis),
+                            "funding_pnl": float(funding_pnl_since_entry),
                         }
                     )
                     shares = 0.0
                     position = 0
+                    funding_pnl_since_entry = 0.0
 
                 # Open new long (skip if insufficient capital)
                 if target_pos == 1 and position == 0 and capital > 0 and size_multiplier > 0:
                     deploy = capital * size_multiplier
-                    exec_price = price * (1 + self.slippage)
+                    exec_price = exec_base_price * (1 + self.slippage)
                     shares = deploy * (1 - self.commission) / exec_price
                     entry_cost_basis = deploy
                     entry_price = exec_price
                     capital -= deploy
                     entry_step = i
                     entry_size_multiplier = size_multiplier
+                    blocked_hold_reentry = False
+                    funding_pnl_since_entry = 0.0
                     trades.append(
                         {
                             "type": "buy",
@@ -246,13 +323,15 @@ class StrategyEvaluator:
                 # Open new short
                 elif target_pos == -1 and position == 0 and capital > 0 and size_multiplier > 0:
                     deploy = capital * size_multiplier
-                    exec_price = price * (1 - self.slippage)
+                    exec_price = exec_base_price * (1 - self.slippage)
                     shares = -(deploy * (1 - self.commission) / exec_price)
                     entry_cost_basis = deploy
                     entry_price = exec_price
                     capital -= deploy * self.commission
                     entry_step = i
                     entry_size_multiplier = size_multiplier
+                    blocked_hold_reentry = False
+                    funding_pnl_since_entry = 0.0
                     trades.append(
                         {
                             "type": "sell_short",
@@ -286,6 +365,7 @@ class StrategyEvaluator:
             proceeds = gross - cost
             capital += proceeds
             pnl = proceeds - entry_cost_basis
+            pnl += funding_pnl_since_entry
             trades.append(
                 {
                     "type": "sell_final",
@@ -296,14 +376,16 @@ class StrategyEvaluator:
                     "entry_price": float(entry_price),
                     "exit_price": float(exec_price),
                     "entry_notional": float(entry_cost_basis),
+                    "funding_pnl": float(funding_pnl_since_entry),
                 }
             )
             equity[-1] = capital
         elif position == -1:
             exec_price = prices[-1] * (1 + self.slippage)
             buy_cost = abs(shares) * exec_price * (1 + self.commission)
-            pnl = entry_cost_basis - buy_cost
-            capital = capital + pnl
+            trading_pnl = entry_cost_basis - buy_cost
+            pnl = trading_pnl + funding_pnl_since_entry
+            capital = capital + trading_pnl
             trades.append(
                 {
                     "type": "buy_cover_final",
@@ -314,6 +396,7 @@ class StrategyEvaluator:
                     "entry_price": float(entry_price),
                     "exit_price": float(exec_price),
                     "entry_notional": float(entry_cost_basis),
+                    "funding_pnl": float(funding_pnl_since_entry),
                 }
             )
             equity[-1] = capital
@@ -357,6 +440,14 @@ class StrategyEvaluator:
         mfe_since_entry = 0.0
         trade_id = 0
         peak_equity = self.initial_capital
+        funding_pnl_since_entry = 0.0
+        funding_rates = np.zeros(len(signals), dtype=float)
+        if df is not None and "funding_rate" in df.columns:
+            funding_rates = (
+                pd.to_numeric(df["funding_rate"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+            )
+            if len(funding_rates) != len(signals):
+                raise ValueError("df funding_rate must match signals and prices length")
 
         def mark_equity(price: float) -> float:
             if position == 1:
@@ -400,7 +491,7 @@ class StrategyEvaluator:
 
         def open_position(target_pos: int, i: int, price: float, size_multiplier: float) -> None:
             nonlocal adverse_reduced, break_even_fired, capital, entry_cost_basis, entry_price
-            nonlocal entry_size_multiplier, mfe_since_entry
+            nonlocal entry_size_multiplier, funding_pnl_since_entry, mfe_since_entry
             nonlocal entry_step, original_entry_notional, parent_trade_id, position
             nonlocal remaining_fraction, shares
 
@@ -427,6 +518,7 @@ class StrategyEvaluator:
             remaining_fraction = 1.0
             adverse_reduced = False
             break_even_fired = False
+            funding_pnl_since_entry = 0.0
             mfe_since_entry = 0.0
             time_loss_fired.clear()
             position = target_pos
@@ -450,7 +542,7 @@ class StrategyEvaluator:
             final: bool = False,
         ) -> None:
             nonlocal adverse_reduced, break_even_fired, capital, entry_cost_basis, entry_price
-            nonlocal entry_size_multiplier, mfe_since_entry
+            nonlocal entry_size_multiplier, funding_pnl_since_entry, mfe_since_entry
             nonlocal entry_step, original_entry_notional, parent_trade_id, position
             nonlocal remaining_fraction, shares
 
@@ -459,13 +551,14 @@ class StrategyEvaluator:
             fraction = min(1.0, fraction)
             closed_fraction = remaining_fraction * fraction
             new_remaining = max(0.0, remaining_fraction - closed_fraction)
+            funding_closed = funding_pnl_since_entry * fraction
             if position == 1:
                 exec_price = price * (1 - self.slippage)
                 close_shares = shares * fraction
                 gross = close_shares * exec_price
                 proceeds = gross - gross * self.commission
                 cost_basis_closed = entry_cost_basis * fraction
-                pnl = proceeds - cost_basis_closed
+                pnl = proceeds - cost_basis_closed + funding_closed
                 capital += proceeds
                 shares -= close_shares
                 event_type = "sell_final" if final else "sell"
@@ -474,13 +567,15 @@ class StrategyEvaluator:
                 close_shares = abs(shares) * fraction
                 buy_cost = close_shares * exec_price * (1 + self.commission)
                 cost_basis_closed = entry_cost_basis * fraction
-                pnl = cost_basis_closed - buy_cost
-                capital += pnl
+                trading_pnl = cost_basis_closed - buy_cost
+                pnl = trading_pnl + funding_closed
+                capital += trading_pnl
                 shares += close_shares
                 event_type = "buy_cover_final" if final else "buy_cover"
             if capital < 0:
                 capital = 0.0
             entry_cost_basis -= cost_basis_closed
+            funding_pnl_since_entry -= funding_closed
             logical_closed = new_remaining <= 1e-12 or abs(shares) <= 1e-12
             trades.append(
                 {
@@ -497,6 +592,7 @@ class StrategyEvaluator:
                     "is_partial": not logical_closed,
                     "exit_reason": reason,
                     "closed_fraction": float(closed_fraction),
+                    "funding_pnl": float(funding_closed),
                     "remaining_fraction": float(0.0 if logical_closed else new_remaining),
                     "logical_trade_closed": logical_closed,
                 }
@@ -510,6 +606,7 @@ class StrategyEvaluator:
                 entry_price = 0.0
                 entry_step = -1
                 entry_size_multiplier = 0.0
+                funding_pnl_since_entry = 0.0
                 parent_trade_id = -1
                 remaining_fraction = 0.0
                 adverse_reduced = False
@@ -618,6 +715,13 @@ class StrategyEvaluator:
         for i in range(len(signals)):
             signal = int(signals[i])
             price = float(prices[i])
+            funding_rate = float(funding_rates[i])
+            if position != 0 and funding_rate != 0.0 and np.isfinite(funding_rate):
+                notional = abs(shares) * price
+                funding_cashflow = -position * notional * funding_rate
+                capital += funding_cashflow
+                funding_pnl_since_entry += funding_cashflow
+
             target_pos = target_from_signal(signal)
             marked_equity = mark_equity(price)
             if marked_equity > peak_equity:
@@ -717,6 +821,7 @@ class StrategyEvaluator:
         prices: np.ndarray,
         df: pd.DataFrame | None = None,
         position_sizes: np.ndarray | None = None,
+        execution_hints: np.ndarray | None = None,
     ) -> Tuple[float, Dict[str, float], List[Dict[str, Any]]]:
         """Evaluate a set of signals and return a composite score.
 
@@ -729,13 +834,20 @@ class StrategyEvaluator:
             prices: Array of close prices.
             df: Optional DataFrame (unused; kept for API compatibility).
             position_sizes: Optional per-bar entry size multipliers.
+            execution_hints: Optional per-bar reason strings for mixed execution.
 
         Returns:
             A tuple ``(score, metrics, trades)`` where ``score`` is a
             composite float in [0, 1], ``metrics`` is the dict from
             ``compute_metrics``, and ``trades`` is the trade list.
         """
-        equity, trades = self.simulate(signals, prices, df, position_sizes=position_sizes)
+        equity, trades = self.simulate(
+            signals,
+            prices,
+            df,
+            position_sizes=position_sizes,
+            execution_hints=execution_hints,
+        )
 
         # Guard: invalid equity curve
         if len(equity) == 0 or not np.all(np.isfinite(equity)):

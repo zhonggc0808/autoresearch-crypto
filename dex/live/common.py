@@ -20,6 +20,7 @@ from typing import Any, Callable, Optional, Tuple
 
 import pandas as pd
 
+from dex.regime_filter import apply_regime_short_filter, build_daily_regime_labels
 from dex.strategy_signals import generate_strategy_signals
 
 
@@ -207,6 +208,76 @@ def save_state(state: dict, path: str) -> None:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
+FEE_FIELD_NAMES = (
+    "fee",
+    "feeCcy",
+    "fillFee",
+    "fillFeeCcy",
+    "follFee",
+    "tradeFee",
+    "tradeFeeCcy",
+    "rebate",
+    "rebateCcy",
+    "pnl",
+)
+
+
+def extract_fee_fields(order: Any) -> dict[str, Any]:
+    """Keep exchange fee fields from an order/fill response."""
+    if not isinstance(order, dict):
+        return {}
+
+    fee_fields: dict[str, Any] = {}
+    sources = [order]
+    info = order.get("info")
+    if isinstance(info, dict):
+        sources.append(info)
+
+    for source in sources:
+        for key in FEE_FIELD_NAMES:
+            value = source.get(key)
+            if value not in (None, ""):
+                fee_fields[key] = value
+
+    fees = order.get("fees")
+    if fees:
+        fee_fields["fees"] = fees
+    return fee_fields
+
+
+def attach_fee_fields_to_trade(
+    trades: list[dict[str, Any]], order_id: Any, fee_fields: dict[str, Any]
+) -> bool:
+    """Merge fee fields into the newest trade with the same order id."""
+    if not order_id or not fee_fields:
+        return False
+
+    target = str(order_id)
+    for trade in reversed(trades):
+        if str(trade.get("orderId")) == target:
+            trade.update(fee_fields)
+            return True
+    return False
+
+
+def append_funding_fee_record(
+    state: dict[str, Any], record: dict[str, Any], max_records: int = 100
+) -> bool:
+    record_id = record.get("id")
+    if not record_id:
+        return False
+
+    records = state.setdefault("funding_fee_records", [])
+    target = str(record_id)
+    if any(str(item.get("id")) == target for item in records):
+        return False
+
+    records.append(record)
+    if len(records) > max_records:
+        del records[:-max_records]
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -310,7 +381,36 @@ def align_next_wake_time(interval_seconds: int, offset_seconds: int = 15) -> dat
 # ---------------------------------------------------------------------------
 
 
-def predict_signal(strategy: Any, df: pd.DataFrame, enable_short: bool = False) -> Tuple[int, dict]:
+def apply_signal_filter(
+    signals,
+    df: pd.DataFrame,
+    signal_filter: dict,
+) -> Tuple[Any, dict]:
+    filter_type = str(signal_filter.get("type", ""))
+    if filter_type != "regime_short_filter":
+        raise ValueError(f"Unsupported signal_filter type: {filter_type}")
+
+    fast_days = int(signal_filter.get("fast_days", 50))
+    slow_days = int(signal_filter.get("slow_days", 200))
+    regimes = build_daily_regime_labels(df, fast_days=fast_days, slow_days=slow_days)
+    filtered, _ = apply_regime_short_filter(signals, regimes, df)
+    i = len(filtered) - 1
+    return filtered, {
+        "signal_filter": filter_type,
+        "regime": str(regimes[i]),
+        "raw_signal": int(signals[i]),
+        "filtered_signal": int(filtered[i]),
+        "regime_fast_days": fast_days,
+        "regime_slow_days": slow_days,
+    }
+
+
+def predict_signal(
+    strategy: Any,
+    df: pd.DataFrame,
+    enable_short: bool = False,
+    signal_filter: Optional[dict] = None,
+) -> Tuple[int, dict]:
     """Generate trading signal and strategy display info.
 
     Args:
@@ -324,6 +424,9 @@ def predict_signal(strategy: Any, df: pd.DataFrame, enable_short: bool = False) 
         2=long, 3=short.
     """
     signals = generate_strategy_signals(strategy, df, enable_short=enable_short)
+    filter_info = {}
+    if signal_filter:
+        signals, filter_info = apply_signal_filter(signals, df, signal_filter)
     signal_id = int(signals[-1])
 
     close = df["close"].values
@@ -350,6 +453,7 @@ def predict_signal(strategy: Any, df: pd.DataFrame, enable_short: bool = False) 
         "mid": float(mid.iloc[-1]),
         "lower": float(lower.iloc[-1]),
     }
+    signal_info.update(filter_info)
     return signal_id, signal_info
 
 

@@ -42,6 +42,11 @@ LIVE_STRATEGY_PROFILES: dict[str, LiveStrategyProfile] = {
         checkpoint="checkpoints/channel_breakout_375_432.pt",
         strategy_version="2.0",
     ),
+    "channel_breakout_v2_regime_filter_50_200": LiveStrategyProfile(
+        name="channel_breakout_v2_regime_filter_50_200",
+        checkpoint="checkpoints/channel_breakout_v2_regime_filter_50_200.pt",
+        strategy_version="2.0-regime-filter",
+    ),
     "channel_breakout_v2_1_balanced": LiveStrategyProfile(
         name="channel_breakout_v2_1_balanced",
         checkpoint="checkpoints/channel_breakout_v2_1_balanced.pt",
@@ -51,6 +56,27 @@ LIVE_STRATEGY_PROFILES: dict[str, LiveStrategyProfile] = {
         name="channel_breakout_v2_2_mtg_bcd",
         checkpoint="checkpoints/channel_breakout_v2_2_mtg_bcd.json",
         strategy_version="2.2",
+    ),
+    "channel_breakout_v2_2_m375_bbm375_1p5": LiveStrategyProfile(
+        name="channel_breakout_v2_2_m375_bbm375_1p5",
+        checkpoint="checkpoints/channel_breakout_v2_2_m375_bbm375_1p5.json",
+        strategy_version="2.2-bb375-1.5",
+    ),
+    "channel_breakout_v2_2_m375_bbm375_1p5_retest_w96_tol50bp_nextopen": LiveStrategyProfile(
+        name="channel_breakout_v2_2_m375_bbm375_1p5_retest_w96_tol50bp_nextopen",
+        checkpoint=(
+            "checkpoints/"
+            "channel_breakout_v2_2_m375_bbm375_1p5_retest_w96_tol50bp_nextopen.json"
+        ),
+        strategy_version="2.2-bb375-1.5-retest-w96-tol50bp-nextopen",
+    ),
+    "channel_breakout_v2_2_m375_bbm375_1p5_retest_w72_tol50bp_bbdist20_nextopen": LiveStrategyProfile(
+        name="channel_breakout_v2_2_m375_bbm375_1p5_retest_w72_tol50bp_bbdist20_nextopen",
+        checkpoint=(
+            "checkpoints/"
+            "channel_breakout_v2_2_m375_bbm375_1p5_retest_w72_tol50bp_bbdist20_nextopen.json"
+        ),
+        strategy_version="2.2-bb375-1.5-retest-w72-tol50bp-bbdist20-nextopen",
     ),
     "channel_breakout_v2_3_combo_balanced": LiveStrategyProfile(
         name="channel_breakout_v2_3_combo_balanced",

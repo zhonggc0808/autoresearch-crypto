@@ -120,6 +120,18 @@ def _load_recent_results(n: int = 5) -> str:
             parts_clean.append(f"X:{disqual}")
         elif warnings:
             parts_clean.append(f"W:{warnings}")
+        metrics = []
+        for label, key in (
+            ("roll12", "rolling_12m_min"),
+            ("is_dd", "is_dd"),
+            ("fee10", "fee_10bp_return"),
+            ("corr", "corr_vs_baseline"),
+        ):
+            value = row.get(key)
+            if value not in (None, ""):
+                metrics.append(f"{label}:{value}")
+        if metrics:
+            parts_clean.append(" ".join(metrics))
         summaries.append(" | ".join(parts_clean))
     return "\n".join(summaries)
 
@@ -151,6 +163,7 @@ def build_context(
     experiment_id: str,
     scorecard: Dict[str, Any],
     evaluation_state: Optional[Dict[str, Any]] = None,
+    target_family: str = "channel_breakout",
 ) -> str:
     """Build the reviewer prompt context from scorecard + evaluation state."""
     template = _load_prompt_template()
@@ -169,7 +182,6 @@ def build_context(
         display_eid = f"{cand_eid} (oracle: {oracle_eid})"
 
     # Determine evaluation stage
-    eid = display_eid
     stage = scorecard.get("stage", "1300d")
     verdict_label = v.get("label", "?")
     verdict_reason = v.get("reason", "?")
@@ -183,6 +195,7 @@ def build_context(
     context = (
         template
         .replace("{{EXPERIMENT_ID}}", display_eid)
+        .replace("{{TARGET_FAMILY}}", target_family)
         .replace("{{DESCRIPTION}}", scorecard.get("description") or scorecard.get("hypothesis", "(not set)")[:160])
         .replace("{{HYPOTHESIS}}", scorecard.get("hypothesis") or "(not set)")
         .replace("{{EVALUATION_STAGE}}", eval_stage)
@@ -293,7 +306,6 @@ def _scorecard_from_evaluation_state(state: Dict[str, Any]) -> Dict[str, Any]:
 
 def _find_latest_experiment_id() -> Optional[str]:
     """Find the most recent experiment with a scorecard."""
-    import os
     scores = []
     if LLM_SCORECARDS_DIR.exists():
         for f in LLM_SCORECARDS_DIR.iterdir():
@@ -320,6 +332,18 @@ def _find_from_candidate_file(candidate_path_str: str) -> Optional[str]:
         return spec.get("experiment_id")
     except (json.JSONDecodeError, IOError):
         return cpath.stem
+
+
+def _load_candidate_family(experiment_id: str) -> str:
+    path = LLM_CANDIDATES_DIR / f"{experiment_id}.json"
+    if not path.exists():
+        return "channel_breakout"
+    try:
+        spec = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, IOError):
+        return "channel_breakout"
+    family = spec.get("strategy")
+    return family if isinstance(family, str) and family else "channel_breakout"
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +423,39 @@ def validate_action(
             errors.append(f"Forbidden content detected ({reason})")
 
     return errors
+
+
+def _normalize_action_fields(action: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize common LLM action shape slips before validation."""
+    if action.get("target_family") != "exit_logic_variant":
+        return action
+    allowed_change = action.get("allowed_change")
+    if not isinstance(allowed_change, dict):
+        return action
+
+    exit_keys = {
+        "exit_lookback",
+        "take_profit_pct",
+        "stop_loss_pct",
+        "max_hold_bars",
+        "trailing_stop",
+        "profit_lock",
+        "profit_lock_by_regime",
+        "mature_trend_exit",
+    }
+    nested = {}
+    for key in list(allowed_change.keys()):
+        if key in exit_keys:
+            nested[key] = allowed_change.pop(key)
+    if nested:
+        allowed_change.setdefault("exit_logic", {}).update(nested)
+    exit_logic = allowed_change.get("exit_logic")
+    if isinstance(exit_logic, dict):
+        for alias in ("atr_multiplier", "mfe_multiplier", "activate_mfe_multiplier"):
+            if alias in exit_logic:
+                value = exit_logic.pop(alias)
+                exit_logic.setdefault("mature_trend_exit", {})["activate_mfe_pct"] = value
+    return action
 
 
 def _validate_allowed_change(
@@ -514,7 +571,7 @@ def review_candidate(
     }
 
     print(f"\n{'='*60}")
-    print(f"  LLM Result Reviewer v0.5")
+    print("  LLM Result Reviewer v0.5")
     print(f"  Experiment: {experiment_id}")
     print(f"{'='*60}")
 
@@ -534,10 +591,11 @@ def review_candidate(
     eval_stage = evaluation_state.get("state", scorecard.get("stage", "1300d")) \
         if evaluation_state else scorecard.get("stage", "1300d")
     print(f"  Stage: {eval_stage}   Verdict: {verdict_label}")
+    target_family = _load_candidate_family(experiment_id)
 
     # --- Build context ---
     print("\n[Step 2] Building context ...")
-    context = build_context(experiment_id, scorecard, evaluation_state)
+    context = build_context(experiment_id, scorecard, evaluation_state, target_family)
 
     if dry_run:
         print("  (dry-run: printing context, skipping LLM call)")
@@ -582,6 +640,8 @@ def review_candidate(
     # The LLM may see the oracle scorecard ID and use it, but actions
     # must reference the candidate ID (exp_NNNN), not the oracle run.
     action["source_candidate_id"] = experiment_id
+    action["target_family"] = target_family
+    action = _normalize_action_fields(action)
 
     proposed_action = action.get("action", "?")
     print(f"  Proposed action: {proposed_action}")
@@ -685,7 +745,7 @@ def main():
     elif args.candidate:
         eid = _find_from_candidate_file(args.candidate)
         if eid is None:
-            print(f"ERROR: Could not determine experiment_id from candidate file")
+            print("ERROR: Could not determine experiment_id from candidate file")
             sys.exit(1)
 
     result = review_candidate(eid, dry_run=args.dry_run)
@@ -696,12 +756,12 @@ def main():
         print(f"  Path: {result['action_path']}")
         sys.exit(0)
     elif result["status"] == "rejected":
-        print(f"  [FAIL] Action rejected:")
+        print("  [FAIL] Action rejected:")
         for e in result["errors"]:
             print(f"    - {e}")
         sys.exit(1)
     elif result["status"] == "dry_run":
-        print(f"  [OK] Dry-run complete.")
+        print("  [OK] Dry-run complete.")
         sys.exit(0)
     else:
         print(f"  [ERROR] {result['errors']}")

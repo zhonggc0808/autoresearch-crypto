@@ -327,7 +327,7 @@ def _build_family_analysis(runs: List[Dict[str, Any]]) -> str:
     )
 
     for r in runs:
-        fam = r.get("family", "unknown")
+        fam = r.get("family") or "unknown"
         families[fam]["candidate_ids"].append(r.get("candidate_id", "?"))
         families[fam]["final_states"].append(r.get("final_state", "?"))
 
@@ -347,7 +347,7 @@ def _build_family_analysis(runs: List[Dict[str, Any]]) -> str:
                 families[fam]["fork_chains"].append(f"{parent} -> {child}")
 
     lines = []
-    for fam, data in sorted(families.items()):
+    for fam, data in sorted(families.items(), key=lambda item: item[0]):
         n = len(data["candidate_ids"])
         if n == 0:
             continue
@@ -679,7 +679,20 @@ def _parse_review_response(response_text: str) -> Optional[Dict[str, Any]]:
                 return None
         else:
             return None
-    return parsed if isinstance(parsed, dict) else None
+    if not isinstance(parsed, dict):
+        return None
+    _normalize_review_id(parsed)
+    return parsed
+
+
+def _normalize_review_id(review: Dict[str, Any]) -> None:
+    """Normalize common LLM review_id shape slips in-place."""
+    rid = review.get("review_id")
+    if not isinstance(rid, str):
+        return
+    match = re.fullmatch(r"meta_(\d{1,3})", rid)
+    if match:
+        review["review_id"] = f"meta_{int(match.group(1)):04d}"
 
 
 def _write_review(review: Dict[str, Any]) -> Path:

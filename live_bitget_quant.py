@@ -54,7 +54,10 @@ from dex.checkpoints import (
 )
 from dex.data import list_crypto_files, load_crypto_data
 from dex.live.common import (
+    append_funding_fee_record,
+    attach_fee_fields_to_trade,
     compute_order_price,
+    extract_fee_fields,
     plan_close_order,
     plan_entry_order,
     predict_signal,
@@ -68,8 +71,17 @@ from dex.live.profiles import (
 from dex.live.profiles import (
     resolve_checkpoint_path as resolve_live_checkpoint_path,
 )
+from dex.live.retest_guards import (
+    bar_timestamp_str,
+    guard_retest_hold_reentry,
+    guard_retest_next_open,
+    log_retest_gap_if_any,
+    record_retest_schedule_state,
+)
+from dex.live.retest_replay import format_retest_replay_row, replay_retest_bar_by_bar
 from dex.live.risk import evaluate_live_risk
 from dex.live.signals import generate_live_regime_channel_breakout_signal
+from dex.live.timesfm_gate import TimesFMLiveGate
 from dex.regime_permissions import (
     RiskOffConfig,
 )
@@ -168,6 +180,20 @@ def notify_trade_action(action, *, notify_email_to=None, mode=None, symbol=None,
         payload,
         to_addr=notify_email_to,
         log_fn=log_message,
+    )
+
+
+def _notify_open_filled(state, symbol, pos_dir, price, size, was_flip=False):
+    if not state.get("notify_email_to"):
+        return False
+    return notify_trade_action(
+        "FLIP_OPEN_FILLED" if was_flip else "OPEN_FILLED",
+        notify_email_to=state["notify_email_to"],
+        mode=state.get("mode_name"),
+        symbol=symbol,
+        direction=pos_dir,
+        price=price,
+        size=size,
     )
 
 
@@ -322,6 +348,25 @@ def init_bitget_api(demo=False):
     return exchange
 
 
+@retry_on_exception(max_retries=3, delay=1.0)
+def init_bitget_public_api(demo=False):
+    config = {
+        "enableRateLimit": True,
+        "options": {"defaultType": "swap"},
+    }
+    proxy = os.environ.get("BITGET_HTTP_PROXY") or os.environ.get("HTTP_PROXY")
+    if proxy:
+        config["proxies"] = {"http": proxy, "https": proxy}
+        log_message(f"使用 HTTP 代理: {proxy}")
+    exchange = ccxt.bitget(config)
+    if demo:
+        exchange.enable_demo_trading(True)
+        log_message("已启用 Bitget Demo Trading 公共行情")
+    exchange.load_markets()
+    log_message("Bitget 公共行情 API 连接成功")
+    return exchange
+
+
 # ---------------------------------------------------------------------------
 # Bitget API 封装
 # ---------------------------------------------------------------------------
@@ -363,6 +408,21 @@ def get_balance(exchange, asset="USDT"):
     return free, total
 
 
+def resolve_entry_margin_and_notional(
+    configured_margin: float,
+    available_margin: float,
+    leverage: float,
+    entry_size_multiplier: float = 1.0,
+    reserve_ratio: float = 0.98,
+) -> tuple[float, float]:
+    """Return (margin, notional) clamped to current available USDT."""
+    if configured_margin <= 0 or available_margin <= 0 or leverage <= 0 or entry_size_multiplier <= 0:
+        return 0.0, 0.0
+    base_margin = min(configured_margin, available_margin * reserve_ratio)
+    margin = base_margin * entry_size_multiplier
+    return margin, margin * leverage
+
+
 @retry_on_exception(max_retries=3, delay=1.0)
 def get_position(exchange, symbol):
     """获取永续合约持仓（正=多, 负=空, 0=无）"""
@@ -375,6 +435,44 @@ def get_position(exchange, symbol):
                 contracts = -abs(contracts)
             return contracts
     return 0.0
+
+
+@retry_on_exception(max_retries=3, delay=1.0)
+def fetch_funding_fee_records(exchange, symbol, limit=20):
+    rows = exchange.fetch_funding_history(symbol, limit=limit)
+    records = []
+    for row in rows:
+        amount = float(row.get("amount", 0.0) or 0.0)
+        timestamp = row.get("timestamp")
+        record_id = row.get("id") or f"bitget:{symbol}:{timestamp}:{amount}"
+        records.append(
+            {
+                "id": record_id,
+                "exchange": "bitget",
+                "symbol": row.get("symbol", symbol),
+                "amount": amount,
+                "ccy": row.get("code", "USDT"),
+                "timestamp": timestamp,
+                "datetime": row.get("datetime"),
+                "raw": row,
+            }
+        )
+    return records
+
+
+def sync_funding_fee_records(exchange, symbol, state):
+    try:
+        records = fetch_funding_fee_records(exchange, symbol)
+    except Exception as exc:
+        log_message(f"[FundingFee] 获取资金费率账单失败: {exc}")
+        return
+
+    for record in records:
+        if append_funding_fee_record(state, record):
+            log_message(
+                f"[FundingFee] {record['symbol']} amount={record['amount']} "
+                f"{record['ccy']} id={record['id']}"
+            )
 
 
 @retry_on_exception(max_retries=3, delay=1.0)
@@ -704,7 +802,7 @@ def get_orderbook(exchange, symbol, depth=5):
 
 @retry_on_exception(max_retries=3, delay=1.0)
 def get_order_status(exchange, symbol, order_id):
-    """获取订单状态，返回 (state, fill_sz, avg_px)
+    """获取订单状态，返回 (state, fill_sz, avg_px, fee_fields)
 
     ccxt status -> 内部状态映射:
         open           -> live
@@ -729,7 +827,43 @@ def get_order_status(exchange, symbol, order_id):
     # 部分成交也按 live 处理（后续重试会检查 filled）
     if filled > 0 and state == "live":
         state = "partially_filled"
-    return state, filled, avg_price
+    return state, filled, avg_price, extract_fee_fields(order)
+
+
+def fetch_order_fee_fields(exchange, symbol, order_id):
+    if not order_id:
+        return {}
+    try:
+        _, _, _, fee_fields = get_order_status(exchange, symbol, order_id)
+    except Exception as exc:
+        log_message(f"[Fee] 获取手续费字段失败 order_id={order_id}: {exc}")
+        return {}
+    return fee_fields
+
+
+def record_fee_fields(trades, order_id, fee_fields):
+    if not fee_fields:
+        return False
+    attached = attach_fee_fields_to_trade(trades, order_id, fee_fields)
+    log_message(f"[Fee] order_id={order_id} fields={fee_fields}")
+    return attached
+
+
+def record_state_fee_fields(state, order_id, fee_fields):
+    if not fee_fields:
+        return False
+    attached = record_fee_fields(state.get("trades", []), order_id, fee_fields)
+    if attached:
+        return True
+
+    records = state.setdefault("fee_records", [])
+    target = str(order_id)
+    for record in reversed(records):
+        if str(record.get("orderId")) == target:
+            record.update(fee_fields)
+            return False
+    records.append({"time": datetime.now().isoformat(), "orderId": order_id, **fee_fields})
+    return False
 
 
 @retry_on_exception(max_retries=3, delay=1.0)
@@ -996,6 +1130,10 @@ def execute_trade(
                     "price": order_price,
                 }
             )
+            if close_plan.action == "taker":
+                record_fee_fields(
+                    trades, order_id, fetch_order_fee_fields(exchange, symbol, order_id)
+                )
             flip_close_sub_tag = " [FLIP_CLOSE_SUBMITTED]" if is_flip else ""
             log_message(
                 f"[{close_label}{close_type}] pnl={close_plan.pnl_pct * 100:+.2f}% 下单{close_plan.side} size={close_plan.size:.8f} price={order_price}{flip_close_sub_tag}"
@@ -1126,6 +1264,9 @@ def execute_trade(
                         "price": current_price,
                     }
                 )
+                record_fee_fields(
+                    trades, order_id, fetch_order_fee_fields(exchange, symbol, order_id)
+                )
                 state["position"] = target_pos
                 state["strategy_size"] = plan.size
                 state["entry_price"] = current_price
@@ -1169,7 +1310,7 @@ def execute_trade(
                 state["pending_open"] = True
                 state["pending_order_id"] = order_id
                 state["pending_open_signal"] = 2 if target_pos == 1 else 3
-                state["pending_open_price"] = current_price
+                state["pending_open_price"] = plan.price
                 state["pending_open_size"] = plan.size
                 state["pending_open_is_flip"] = is_flip
                 flip_tag = " [FLIP_OPEN_SUBMITTED]" if is_flip else ""
@@ -1377,7 +1518,7 @@ def check_stop_loss(state, current_price, stop_loss_pct=0.03, max_hold_bars=48):
                     f"空头止损: 涨幅 {(current_price - entry_price) / entry_price * 100:.2f}% >= {stop_loss_pct * 100:.0f}%",
                 )
 
-    if current_bar - entry_bar >= max_hold_bars:
+    if max_hold_bars > 0 and current_bar - entry_bar >= max_hold_bars:
         pos_name = "多头" if pos == 1 else "空头"
         return True, f"{pos_name}时间退出: 持仓 {current_bar - entry_bar} 根K线 >= {max_hold_bars}"
 
@@ -1494,6 +1635,8 @@ def force_close(
                 "reason": reason,
             }
         )
+        if not use_maker:
+            record_fee_fields(trades, order_id, fetch_order_fee_fields(exchange, symbol, order_id))
         state["trades"] = trades
 
         if success_state_updates:
@@ -1882,6 +2025,17 @@ def main():
         default=os.environ.get("TRADE_NOTIFY_EMAIL_TO"),
         help="交易通知邮件地址（默认读取 TRADE_NOTIFY_EMAIL_TO 环境变量）",
     )
+    parser.add_argument("--timesfm-candidate", default="", help="TimesFM gate candidate JSON")
+    parser.add_argument(
+        "--timesfm-model",
+        default="research_workspace/diagnostics/timesfm_local_model",
+        help="TimesFM 本地模型目录；不建议 live 时在线下载",
+    )
+    parser.add_argument(
+        "--timesfm-cache",
+        default="data/live_cache/bitget_timesfm_gate_cache.json",
+        help="TimesFM live forecast cache",
+    )
     args = parser.parse_args()
 
     if not args.demo and not args.live:
@@ -1916,9 +2070,13 @@ def main():
         sys.exit(1)
 
     checkpoint = load_checkpoint(args.checkpoint)
+    timesfm_gate = None
 
     # ── detect v2.1/v2.2 regime_permission-compatible checkpoint ──────────
     is_v21 = is_regime_channel_breakout_checkpoint(checkpoint)
+    signal_filter = None
+    legacy_required_bars = 100
+    legacy_candle_limit = 500
 
     if is_v21:
         log_message(f"检测到 v2.1-compatible checkpoint: {checkpoint.get('strategy_type')}")
@@ -1950,9 +2108,23 @@ def main():
             + ("enabled" if v21_exit_overlays_enabled else "disabled")
             + ("" if v21_exit_logic else " (no exit_logic)")
         )
+        if args.timesfm_candidate:
+            timesfm_gate = TimesFMLiveGate.from_candidate(
+                args.timesfm_candidate,
+                args.timesfm_model,
+                args.timesfm_cache,
+                checkpoint_variant=str(checkpoint.get("variant", "")),
+            )
+            log_message(
+                f"TimesFM gate ENABLED: candidate={timesfm_gate.candidate_id} "
+                f"context={timesfm_gate.context} horizon={timesfm_gate.horizon}"
+            )
     else:
+        if args.timesfm_candidate:
+            raise ValueError("TimesFM gate only supports v2.1/v2.2 ChannelBreakout checkpoints")
         # ── legacy single-strategy checkpoint ─────────────────────────────
         params = dict(checkpoint.get("params") or {})
+        signal_filter = checkpoint.get("signal_filter")
         if "rsi_low" in params:
             params["rsi_low"] = max(params["rsi_low"], 30)
         params["enable_short"] = enable_short
@@ -1964,6 +2136,24 @@ def main():
         strategy = build_strategy_from_checkpoint(checkpoint)
         for line in describe_strategy(strategy, strategy_type):
             log_message(line)
+        legacy_required_bars = (
+            int(getattr(strategy, "warmup_bars", getattr(strategy, "window", 300))) + 10
+        )
+        legacy_candle_limit = max(
+            500,
+            legacy_required_bars + 100,
+            int(getattr(strategy, "entry_lookback", 0)) + 100,
+        )
+        if signal_filter:
+            slow_days = int(signal_filter.get("slow_days", 200))
+            filter_bars = (slow_days + 60) * (86400 // interval_seconds)
+            legacy_required_bars = max(legacy_required_bars, filter_bars)
+            legacy_candle_limit = max(legacy_candle_limit, filter_bars)
+            log_message(
+                "Signal filter: "
+                f"{signal_filter.get('type')} "
+                f"fast={signal_filter.get('fast_days', 50)} slow={slow_days}"
+            )
 
         v21_bull_s = v21_bear_s = v21_neutral_s = None
         v21_bull_cfg = v21_bear_cfg = v21_neutral_cfg = None
@@ -1974,11 +2164,12 @@ def main():
         v21_exit_overlays_enabled = False
 
     # 初始化 Bitget API
-    exchange = init_bitget_api(demo=args.demo)
+    exchange = init_bitget_public_api(demo=args.demo) if args.signal_only else init_bitget_api(demo=args.demo)
 
     # 设置杠杆 + 双向持仓模式（Bitget 默认单向，需要切换）
-    set_leverage(exchange, symbol, args.leverage)
-    set_hedged_mode(exchange, symbol)
+    if not args.signal_only:
+        set_leverage(exchange, symbol, args.leverage)
+        set_hedged_mode(exchange, symbol)
 
     # 获取交易对信息
     inst_info = get_instrument_info(exchange, symbol)
@@ -1991,8 +2182,32 @@ def main():
     )
 
     # 加载或初始化状态
-    state = load_state()
-    if state is None:
+    state = None if args.signal_only else load_state()
+    if args.signal_only:
+        state = {
+            "symbol": args.symbol,
+            "ccxt_symbol": symbol,
+            "interval": args.interval,
+            "position": 0,
+            "strategy_size": 0.0,
+            "trades": [],
+            "last_signal": 1,
+            "last_price": 0.0,
+            "bar_count": 0,
+            "entry_price": 0.0,
+            "entry_bar": 0,
+            "last_processed_bar": "",
+            "pending_open": False,
+            "scheduled_entry_direction": 0,
+            "scheduled_entry_due_bar": "",
+            "scheduled_entry_reason": "",
+            "scheduled_entry_level": 0.0,
+            "v21_permission_signal": 1,
+            "v21_exit_overlays_enabled": False,
+            "v21_exit_overlay_changed": False,
+        }
+        log_message("Signal-Only 使用临时内存状态，不读取/写入交易状态文件")
+    elif state is None:
         # 首次运行：用当前 USDT 权益作为本金基准
         avail_usdt, eq_usdt = get_balance(exchange, "USDT")
         ticker = exchange.fetch_ticker(symbol)
@@ -2012,6 +2227,7 @@ def main():
             "bar_count": 0,
             "entry_price": 0.0,
             "entry_bar": 0,
+            "last_processed_bar": "",
             "tp_order_id": None,
             "tp_price": 0.0,
             "tp_side": None,
@@ -2021,6 +2237,10 @@ def main():
             "pending_open_price": 0.0,
             "pending_open_size": 0.0,
             "pending_open_is_flip": False,
+            "scheduled_entry_direction": 0,
+            "scheduled_entry_due_bar": "",
+            "scheduled_entry_reason": "",
+            "scheduled_entry_level": 0.0,
             # v2.1 fields
             "v21_regime": "",
             "v21_permission_reason": "",
@@ -2053,6 +2273,7 @@ def main():
         state.setdefault("bar_count", 0)
         state.setdefault("entry_price", 0.0)
         state.setdefault("entry_bar", 0)
+        state.setdefault("last_processed_bar", "")
         state.setdefault("tp_order_id", None)
         state.setdefault("tp_price", 0.0)
         state.setdefault("tp_side", None)
@@ -2062,6 +2283,10 @@ def main():
         state.setdefault("pending_open_price", 0.0)
         state.setdefault("pending_open_size", 0.0)
         state.setdefault("pending_open_is_flip", False)
+        state.setdefault("scheduled_entry_direction", 0)
+        state.setdefault("scheduled_entry_due_bar", "")
+        state.setdefault("scheduled_entry_reason", "")
+        state.setdefault("scheduled_entry_level", 0.0)
         state.setdefault("ccxt_symbol", symbol)
         # v2.1 fields
         state.setdefault("v21_regime", "")
@@ -2090,14 +2315,15 @@ def main():
             log_message(f"补录初始权益基准: {eq_usdt:.2f} USDT")
 
     # ── 冷启动 state 对齐 ─────────────────────────────────────────────
-    state = reconcile_state_on_startup(
-        exchange,
-        symbol,
-        state,
-        args,
-        lot_sz,
-        is_signal_only=args.signal_only,
-    )
+    if not args.signal_only:
+        state = reconcile_state_on_startup(
+            exchange,
+            symbol,
+            state,
+            args,
+            lot_sz,
+            is_signal_only=False,
+        )
     if state is None:
         log_message("state 不匹配需重建，重置为新 state")
         avail_usdt, eq_usdt = get_balance(exchange, "USDT")
@@ -2117,6 +2343,7 @@ def main():
             "bar_count": 0,
             "entry_price": 0.0,
             "entry_bar": 0,
+            "last_processed_bar": "",
             "tp_order_id": None,
             "tp_price": 0.0,
             "tp_side": None,
@@ -2125,6 +2352,10 @@ def main():
             "pending_open_signal": 0,
             "pending_open_price": 0.0,
             "pending_open_size": 0.0,
+            "scheduled_entry_direction": 0,
+            "scheduled_entry_due_bar": "",
+            "scheduled_entry_reason": "",
+            "scheduled_entry_level": 0.0,
             "v21_regime": "",
             "v21_permission_reason": "",
             "v21_allow_long": True,
@@ -2148,7 +2379,8 @@ def main():
     state["mode_name"] = mode_name
     state["strategy_profile"] = args.strategy_profile
     state["risk_profile"] = risk_config.get("risk_profile", "none")
-    save_state(state)
+    if not args.signal_only:
+        save_state(state)
 
     try:
         while True:
@@ -2157,11 +2389,21 @@ def main():
 
             try:
                 # 0. 同步实际持仓（防止过期 state 导致误判）
-                actual_pos = get_position(exchange, symbol)
-                stale_pos = state.get("position", 0)
-                if abs(actual_pos) < lot_sz * 0.5 and stale_pos != 0:
+                if not args.signal_only:
+                    actual_pos = get_position(exchange, symbol)
+                    stale_pos = state.get("position", 0)
+                else:
+                    actual_pos = 0.0
+                    stale_pos = 0
+                if not args.signal_only and abs(actual_pos) < lot_sz * 0.5 and stale_pos != 0:
                     if state.get("tp_order_id"):
                         # 有 TP 单且持仓归零 -> TP 可能真的成交了
+                        tp_order_id = state.get("tp_order_id")
+                        record_state_fee_fields(
+                            state,
+                            tp_order_id,
+                            fetch_order_fee_fields(exchange, symbol, tp_order_id),
+                        )
                         entry_p = state.get("entry_price", 0)
                         if stale_pos == 1 and entry_p > 0:
                             tp_pnl = (state.get("last_price", 0) - entry_p) / entry_p * 100
@@ -2185,12 +2427,17 @@ def main():
                     state["tp_price"] = 0.0
                     state["tp_side"] = None
                     state["pending_open"] = False
-                elif abs(actual_pos) >= lot_sz * 0.5 and state.get("pending_open"):
+                elif not args.signal_only and abs(actual_pos) >= lot_sz * 0.5 and state.get("pending_open"):
                     # pending_open 挂单成交了（但还没被主循环检测到）
-                    pos_dir = 1 if actual_pos > 0 else -1
-                    flip_open_filled_tag_sync = (
-                        " [FLIP_OPEN_FILLED]" if state.get("pending_open_is_flip") else ""
+                    pending_order_id = state.get("pending_order_id")
+                    record_state_fee_fields(
+                        state,
+                        pending_order_id,
+                        fetch_order_fee_fields(exchange, symbol, pending_order_id),
                     )
+                    pos_dir = 1 if actual_pos > 0 else -1
+                    was_flip = bool(state.get("pending_open_is_flip"))
+                    flip_open_filled_tag_sync = " [FLIP_OPEN_FILLED]" if was_flip else ""
                     log_message(
                         f"[持仓同步] 检测到挂单已成交: 实际={actual_pos:.6f}{flip_open_filled_tag_sync}"
                     )
@@ -2206,15 +2453,28 @@ def main():
                         state["entry_bar"] = state.get("bar_count", 0) - 1
                     state["pending_open"] = False
                     state["pending_order_id"] = None
+                    _notify_open_filled(
+                        state,
+                        symbol,
+                        pos_dir,
+                        state["entry_price"],
+                        state["strategy_size"],
+                        was_flip=was_flip,
+                    )
 
                 # ── pending_close 检查 ─────────────────────────────────────
-                if state.get("pending_close"):
+                if not args.signal_only and state.get("pending_close"):
                     actual_pos = get_position(exchange, symbol)
                     pc_order_id = state.get("pending_close_order_id")
 
                     if abs(actual_pos) < lot_sz * 0.5:
                         # 平仓已完成（交易所持仓归零）
                         pc_target = state.get("pending_close_target", 0)
+                        record_state_fee_fields(
+                            state,
+                            pc_order_id,
+                            fetch_order_fee_fields(exchange, symbol, pc_order_id),
+                        )
                         flip_tag = " [FLIP_CLOSE_FILLED]" if pc_target in (1, -1) else ""
                         log_message(
                             f"[PENDING_CLOSE_FILLED] 持仓已归零, 清除 pending_close "
@@ -2249,13 +2509,15 @@ def main():
                     # 仍有仓位，检查订单状态
                     if pc_order_id:
                         try:
-                            order_state, fill_sz, avg_px = get_order_status(
+                            order_state, _fill_sz, _avg_px, fee_fields = get_order_status(
                                 exchange, symbol, pc_order_id
                             )
                         except Exception:
                             order_state = None
+                            fee_fields = {}
 
                         if order_state == "filled":
+                            record_state_fee_fields(state, pc_order_id, fee_fields)
                             log_message(
                                 f"[PENDING_CLOSE_FILLED] 平仓单已成交, 持仓更新 "
                                 f"actual_pos={actual_pos:.6f}"
@@ -2323,16 +2585,20 @@ def main():
 
                 # ── pending_open 优先检查 ──────────────────────────────────
                 # 在获取新 K 线和生成信号前，先确认上一轮的挂单状态
-                if state.get("pending_open") and state.get("pending_order_id"):
+                if not args.signal_only and state.get("pending_open") and state.get("pending_order_id"):
                     pc_id = state["pending_order_id"]
                     try:
-                        o_state, fill_sz, avg_px = get_order_status(exchange, symbol, pc_id)
+                        o_state, fill_sz, avg_px, fee_fields = get_order_status(
+                            exchange, symbol, pc_id
+                        )
                     except Exception:
                         o_state = None
                         fill_sz = 0
                         avg_px = 0.0
+                        fee_fields = {}
 
                     if o_state == "filled":
+                        record_state_fee_fields(state, pc_id, fee_fields)
                         # 挂单已成交 → 更新 state
                         p_sig = state.get("pending_open_signal", 2)
                         pos_dir = 1 if p_sig == 2 else -1
@@ -2407,13 +2673,17 @@ def main():
                     )
                     df = ensure_klines(exchange, symbol, args.interval, required_bars)
                 else:
-                    needed_bars = max(500, strategy.window + 100)
-                    df = fetch_candles(exchange, symbol, bar=args.interval, limit=needed_bars)
+                    if signal_filter:
+                        df = ensure_klines(exchange, symbol, args.interval, legacy_candle_limit)
+                    else:
+                        df = fetch_candles(
+                            exchange, symbol, bar=args.interval, limit=legacy_candle_limit
+                        )
 
                 # ── closed-candle-only guard (v2.1) ─────────────────────────
                 # 丢弃最后一根可能还在形成的 K 线，确保信号基于已收盘 K 线，
                 # 与回测/replay 行为一致。
-                if is_v21 and df is not None and not df.empty:
+                if (is_v21 or signal_filter) and df is not None and not df.empty:
                     interval_ms = interval_seconds * 1000
                     safety_delay_ms = 60000  # 60s 安全裕量
                     last_ts = int(df["timestamp"].iloc[-1])
@@ -2431,7 +2701,7 @@ def main():
                 min_bars_ok = (
                     (df is not None and len(df) >= (max_strategy_window + 10))
                     if is_v21
-                    else (df is not None and len(df) >= (strategy.window + 10 if strategy else 100))
+                    else (df is not None and len(df) >= legacy_required_bars)
                 )
                 if not min_bars_ok:
                     log_message("数据不足，跳过本轮")
@@ -2446,6 +2716,8 @@ def main():
                     current_time = df.iloc[-1]["datetime"]
                     state["last_price"] = current_price
                     state["bar_count"] = state.get("bar_count", 0) + 1
+                    retest_replay_log = None
+                    replay_row = None
 
                     # 2. 生成信号
                     if is_v21:
@@ -2490,6 +2762,68 @@ def main():
                             f"overlay={v21_diag.get('exit_overlays_enabled', False)}"
                         )
 
+                        replay_strategy = {
+                            "BULL": v21_bull_s,
+                            "BEAR": v21_bear_s,
+                            "NEUTRAL": v21_neutral_s,
+                        }.get(str(v21_diag["regime"]).upper())
+                        if replay_strategy is not None and getattr(
+                            replay_strategy, "retest_enabled", False
+                        ):
+                            retest_replay_log = replay_retest_bar_by_bar(df, replay_strategy)
+                            if not retest_replay_log.empty:
+                                replay_row = retest_replay_log.iloc[-1].to_dict()
+                                log_message(format_retest_replay_row(replay_row))
+
+                        if retest_replay_log is not None and replay_row is not None:
+                            log_retest_gap_if_any(
+                                state,
+                                retest_replay_log,
+                                current_time,
+                                interval_seconds,
+                                log_message,
+                            )
+                            record_retest_schedule_state(state, retest_replay_log, replay_row)
+                            signal_id = guard_retest_hold_reentry(
+                                signal_id,
+                                state,
+                                replay_row,
+                                log_message,
+                            )
+                            if not args.signal_only:
+                                signal_id = guard_retest_next_open(
+                                    signal_id,
+                                    state,
+                                    retest_replay_log,
+                                    current_time,
+                                    interval_seconds,
+                                    log_message,
+                                )
+                        if timesfm_gate:
+                            signal_id, timesfm_info = timesfm_gate.apply(
+                                signal_id,
+                                df,
+                                current_position=int(state.get("position", 0)),
+                            )
+                            state["timesfm_gate_active"] = True
+                            state["timesfm_gate_checked"] = bool(timesfm_info.get("checked"))
+                            state["timesfm_gate_allowed"] = bool(timesfm_info.get("allowed"))
+                            state["timesfm_gate_reason"] = timesfm_info.get("reason", "")
+                            state["timesfm_gate_signal_before"] = timesfm_info.get(
+                                "input_signal"
+                            )
+                            state["timesfm_gate_signal_after"] = signal_id
+                            if timesfm_info.get("checked"):
+                                log_message(
+                                    "[TimesFM gate] "
+                                    f"{timesfm_info.get('reason')} "
+                                    f"{timesfm_info.get('input_signal')}->{signal_id} "
+                                    f"median={timesfm_info.get('median_return', 0):+.4%} "
+                                    f"q10={timesfm_info.get('q10_return', 0):+.4%} "
+                                    f"q90={timesfm_info.get('q90_return', 0):+.4%}"
+                                )
+                        state["last_processed_bar"] = bar_timestamp_str(current_time)
+
                         if args.signal_only:
                             log_message(
                                 f"[SIGNAL-ONLY] raw={v21_diag['raw_signal']} "
@@ -2503,7 +2837,6 @@ def main():
                                 f"overlay_changed={v21_diag.get('exit_overlay_changed', False)}"
                             )
                             # skip all trading logic for signal-only
-                            save_state(state)
                             if args.once:
                                 break
                             _sleep_until_next(interval_seconds)
@@ -2511,11 +2844,23 @@ def main():
 
                     else:
                         # ── legacy single-strategy signal ──────────────────
-                        signal_id, bb_info = predict_signal(strategy, df, enable_short=enable_short)
+                        signal_id, bb_info = predict_signal(
+                            strategy,
+                            df,
+                            enable_short=enable_short,
+                            signal_filter=signal_filter,
+                        )
                         current_price = bb_info["price"]
                         state["last_price"] = current_price
 
                         log_message(f"K线时间: {current_time} | 价格: {current_price:.2f}")
+                        if bb_info.get("signal_filter"):
+                            state["signal_filter_regime"] = bb_info["regime"]
+                            state["signal_filter_raw_signal"] = bb_info["raw_signal"]
+                            log_message(
+                                f"Signal filter: regime={bb_info['regime']} "
+                                f"raw={bb_info['raw_signal']} final={bb_info['filtered_signal']}"
+                            )
                         log_message(
                             f"布林带: 上轨={bb_info['upper']:.2f} 中轨={bb_info['mid']:.2f} 下轨={bb_info['lower']:.2f}"
                         )
@@ -2548,6 +2893,18 @@ def main():
                             max_hold_bars=strategy.max_hold_bars,
                         )
 
+                    if args.signal_only:
+                        state["last_signal"] = signal_id
+                        state["last_update"] = datetime.now().isoformat()
+                        log_message(
+                            f"[SIGNAL-ONLY] signal={signal_id} {_signal_name(signal_id)} | "
+                            "不执行持仓同步、撤单、下单或状态保存"
+                        )
+                        if args.once:
+                            break
+                        _sleep_until_next(interval_seconds)
+                        continue
+
                     # 4. 获取盘口数据
                     best_bid, best_ask = get_orderbook(exchange, symbol, depth=1)
                     if best_bid:
@@ -2555,12 +2912,12 @@ def main():
                     else:
                         log_message("盘口数据不可用")
 
-                    risk_capital_per_trade = args.capital * args.leverage
+                    available_usdt, current_equity = get_balance(exchange, "USDT")
+                    entry_size_multiplier = 1.0
                     risk_action_handled = False
                     if not args.signal_only and risk_config.get("risk_profile", "none") != "none":
                         if state.get("position", 0) != 0 and "confirmed_entry_bar" not in state:
                             state["confirmed_entry_bar"] = state.get("entry_bar", 0)
-                        _, current_equity = get_balance(exchange, "USDT")
                         risk_decision = evaluate_live_risk(
                             risk_config,
                             state,
@@ -2576,7 +2933,7 @@ def main():
                             if fired is not None:
                                 success_updates["risk_adverse_stop_fired"] = fired
                         state.update(risk_updates)
-                        risk_capital_per_trade *= risk_decision.entry_size_multiplier
+                        entry_size_multiplier = risk_decision.entry_size_multiplier
 
                         if state.get("position", 0) == 0 and not risk_decision.allow_new_entry:
                             if state.get("pending_open"):
@@ -2626,8 +2983,23 @@ def main():
                                     lot_sz,
                                     strategy,
                                     state,
-                                )
+                            )
                             risk_action_handled = True
+
+                    effective_margin, risk_capital_per_trade = resolve_entry_margin_and_notional(
+                        args.capital,
+                        available_usdt,
+                        args.leverage,
+                        entry_size_multiplier,
+                    )
+                    if effective_margin + 1e-9 < args.capital * entry_size_multiplier:
+                        log_message(
+                            "[资金自适应] "
+                            f"配置保证金={args.capital:.2f} USDT "
+                            f"可用={available_usdt:.2f} USDT "
+                            f"实际保证金={effective_margin:.2f} USDT "
+                            f"名义价值={risk_capital_per_trade:.2f} USDT"
+                        )
 
                     if should_exit:
                         # force_flat / risk-off / permission 禁止→taker reduce-only
@@ -2684,10 +3056,11 @@ def main():
                         pending_order_id = state.get("pending_order_id")
                         if pending and pending_order_id:
                             # 检查挂单是否成交
-                            order_state, fill_sz, avg_px = get_order_status(
+                            order_state, fill_sz, avg_px, fee_fields = get_order_status(
                                 exchange, symbol, pending_order_id
                             )
                             if order_state == "filled":
+                                record_state_fee_fields(state, pending_order_id, fee_fields)
                                 # Maker 挂单成交了!
                                 pos_dir = 1 if fill_sz > 0 else -1  # 根据 pending 信号判断方向
                                 pending_signal = state.get("pending_open_signal", 2)
@@ -2807,8 +3180,11 @@ def main():
                             # 检查 TP 单是否已成交
                             if state.get("position", 0) != 0 and state.get("tp_order_id"):
                                 tp_order_id = state["tp_order_id"]
-                                tp_state, _, _ = get_order_status(exchange, symbol, tp_order_id)
+                                tp_state, _, _, fee_fields = get_order_status(
+                                    exchange, symbol, tp_order_id
+                                )
                                 if tp_state == "filled":
+                                    record_state_fee_fields(state, tp_order_id, fee_fields)
                                     entry_p = state.get("entry_price", 0)
                                     pos_dir = state.get("position", 0)
                                     if pos_dir == 1 and entry_p > 0:
@@ -2864,6 +3240,7 @@ def main():
 
                     # 6. 打印状态
                     print_status(exchange, symbol, state, leverage=args.leverage)
+                    sync_funding_fee_records(exchange, symbol, state)
                     save_state(state)
 
             except BitgetInsufficientMarginError as e:
@@ -2877,10 +3254,12 @@ def main():
                     )
                 except LiveHalt:
                     pass
-                save_state(state)
+                if not args.signal_only:
+                    save_state(state)
                 return
             except LiveHalt:
-                save_state(state)
+                if not args.signal_only:
+                    save_state(state)
                 return
             except Exception as e:
                 log_message(f"本轮执行异常: {e}")
@@ -2903,7 +3282,8 @@ def main():
                 log_message("处理耗时较长，立即进入下一轮")
 
     finally:
-        save_state(state)
+        if not args.signal_only:
+            save_state(state)
         try:
             os.close(lock_fd)
             os.remove(LOCK_FILE)

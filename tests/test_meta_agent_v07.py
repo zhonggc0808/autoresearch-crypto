@@ -19,8 +19,6 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 
 # ---------------------------------------------------------------------------
@@ -164,6 +162,16 @@ class TestReviewValidation:
         errors = validate_review(VALID_REVIEW_NO_CHANGES)
         assert errors == [], f"Expected no errors, got: {errors}"
 
+    def test_parse_review_normalizes_short_review_id(self):
+        from scripts.meta_review import _parse_review_response, validate_review
+
+        response = json.dumps({**VALID_REVIEW, "review_id": "meta_001"})
+        review = _parse_review_response(response)
+
+        assert review is not None
+        assert review["review_id"] == "meta_0001"
+        assert validate_review(review) == []
+
     def test_forbidden_topic_rejected(self):
         from scripts.meta_review import validate_review
         errors = validate_review(REVIEW_WITH_FORBIDDEN_TOPIC)
@@ -294,7 +302,7 @@ class TestContextBuilding:
     """Verify the context builder handles edge cases."""
 
     def test_context_builds_with_data(self):
-        from scripts.meta_review import collect_history, build_context
+        from scripts.meta_review import build_context, collect_history
         history = collect_history(n_runs=5)
         context = build_context(history, "meta_9999")
         assert "Meta-Agent Review" in context
@@ -306,8 +314,7 @@ class TestContextBuilding:
     def test_empty_history(self):
         """Collecting history with no runs should not crash."""
         from scripts.meta_review import collect_history
-        # Temporarily point to empty directories
-        original_runs = __import__('scripts.meta_review', fromlist=['']).RUNS_DIR
+
         # Just verify it doesn't crash with minimal data
         history = collect_history(n_runs=0)
         assert isinstance(history, dict)

@@ -115,6 +115,27 @@ VALID_EXIT_LOGIC_VARIANT = {
     },
 }
 
+VALID_FIXED_POSITION_SCALER = copy.deepcopy(VALID_CHANNEL_BREAKOUT)
+VALID_FIXED_POSITION_SCALER["experiment_id"] = "exp_9992"
+VALID_FIXED_POSITION_SCALER["strategy"] = "fixed_position_scaler"
+VALID_FIXED_POSITION_SCALER["params"]["strategy_type"] = "position_sized_channel_breakout"
+VALID_FIXED_POSITION_SCALER["params"]["position_sizing"] = {
+    "mode": "fixed_fraction",
+    "fixed_fraction": 0.50,
+}
+
+VALID_DRAWDOWN_CONTROL_SCALER = copy.deepcopy(VALID_CHANNEL_BREAKOUT)
+VALID_DRAWDOWN_CONTROL_SCALER["experiment_id"] = "exp_9991"
+VALID_DRAWDOWN_CONTROL_SCALER["strategy"] = "drawdown_control_scaler"
+VALID_DRAWDOWN_CONTROL_SCALER["params"]["strategy_type"] = "drawdown_control_channel_breakout"
+VALID_DRAWDOWN_CONTROL_SCALER["params"]["position_sizing"] = {
+    "mode": "close_drawdown_scale",
+    "base_fraction": 0.30,
+    "reduced_fraction": 0.05,
+    "drawdown_threshold": 0.15,
+    "lookback_bars": 288,
+}
+
 VALID_EXIT_LOGIC_WITH_PROFIT_LOCK = copy.deepcopy(VALID_EXIT_LOGIC_VARIANT)
 VALID_EXIT_LOGIC_WITH_PROFIT_LOCK["experiment_id"] = "exp_9996"
 VALID_EXIT_LOGIC_WITH_PROFIT_LOCK["params"]["exit_logic"]["profit_lock"] = {
@@ -451,10 +472,38 @@ class TestExitLogicVariant:
         assert fd.strategy_type == "exit_logic_channel_breakout"
         assert "exit_logic" in fd.allowed_change_nested
 
+    def test_fixed_position_scaler_registered(self):
+        from scripts.family_registry import get, is_valid
+
+        assert is_valid("fixed_position_scaler")
+        fd = get("fixed_position_scaler")
+        assert fd is not None
+        assert fd.strategy_type == "position_sized_channel_breakout"
+        assert "position_sizing" in fd.allowed_change_nested
+
+    def test_drawdown_control_scaler_registered(self):
+        from scripts.family_registry import get, is_valid
+
+        assert is_valid("drawdown_control_scaler")
+        fd = get("drawdown_control_scaler")
+        assert fd is not None
+        assert fd.strategy_type == "drawdown_control_channel_breakout"
+        assert "position_sizing" in fd.allowed_change_nested
+
     def test_valid_candidate_passes(self):
         from scripts.validate_candidate_v08 import validate_candidate
         errors = validate_candidate(VALID_EXIT_LOGIC_VARIANT, check_uniqueness=False)
         assert errors == [], f"Exit logic variant failed: {errors}"
+
+    def test_fixed_position_scaler_candidate_passes(self):
+        from scripts.validate_candidate_v08 import validate_candidate
+        errors = validate_candidate(VALID_FIXED_POSITION_SCALER, check_uniqueness=False)
+        assert errors == [], f"Fixed position scaler failed: {errors}"
+
+    def test_drawdown_control_scaler_candidate_passes(self):
+        from scripts.validate_candidate_v08 import validate_candidate
+        errors = validate_candidate(VALID_DRAWDOWN_CONTROL_SCALER, check_uniqueness=False)
+        assert errors == [], f"Drawdown control scaler failed: {errors}"
 
     def test_valid_profit_lock_candidate_passes(self):
         from scripts.validate_candidate_v08 import validate_candidate

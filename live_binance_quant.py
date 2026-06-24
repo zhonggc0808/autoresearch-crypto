@@ -67,6 +67,7 @@ from dex.live.profiles import (
 )
 from dex.live.risk import evaluate_live_risk
 from dex.live.signals import generate_live_regime_channel_breakout_signal
+from dex.live.timesfm_gate import TimesFMLiveGate
 from dex.regime_permissions import (
     RiskOffConfig,
 )
@@ -1328,6 +1329,17 @@ def main():
         default=os.environ.get("TRADE_NOTIFY_EMAIL_TO", ""),
         help="交易动作邮件通知收件人；也可用 TRADE_NOTIFY_EMAIL_TO 配置",
     )
+    parser.add_argument("--timesfm-candidate", default="", help="TimesFM gate candidate JSON")
+    parser.add_argument(
+        "--timesfm-model",
+        default="research_workspace/diagnostics/timesfm_local_model",
+        help="TimesFM 本地模型目录；不建议 live 时在线下载",
+    )
+    parser.add_argument(
+        "--timesfm-cache",
+        default="data/live_cache/binance_timesfm_gate_cache.json",
+        help="TimesFM live forecast cache",
+    )
     args = parser.parse_args()
 
     if not args.demo and not args.live:
@@ -1362,7 +1374,11 @@ def main():
         sys.exit(1)
 
     checkpoint = load_checkpoint(args.checkpoint)
+    timesfm_gate = None
     is_v21 = is_regime_channel_breakout_checkpoint(checkpoint)
+    signal_filter = None
+    legacy_required_bars = 100
+    legacy_candle_limit = 500
 
     if is_v21:
         log_message(f"检测到 v2.1-compatible checkpoint: {checkpoint.get('strategy_type')}")
@@ -1390,8 +1406,22 @@ def main():
             + ("enabled" if v21_exit_overlays_enabled else "disabled")
             + ("" if v21_exit_logic else " (no exit_logic)")
         )
+        if args.timesfm_candidate:
+            timesfm_gate = TimesFMLiveGate.from_candidate(
+                args.timesfm_candidate,
+                args.timesfm_model,
+                args.timesfm_cache,
+                checkpoint_variant=str(checkpoint.get("variant", "")),
+            )
+            log_message(
+                f"TimesFM gate ENABLED: candidate={timesfm_gate.candidate_id} "
+                f"context={timesfm_gate.context} horizon={timesfm_gate.horizon}"
+            )
     else:
+        if args.timesfm_candidate:
+            raise ValueError("TimesFM gate only supports v2.1/v2.2 ChannelBreakout checkpoints")
         params = dict(checkpoint.get("params") or {})
+        signal_filter = checkpoint.get("signal_filter")
         if "rsi_low" in params:
             params["rsi_low"] = max(params["rsi_low"], 30)
         params["enable_short"] = enable_short
@@ -1403,6 +1433,24 @@ def main():
         strategy = build_strategy_from_checkpoint(checkpoint)
         for line in describe_strategy(strategy, strategy_type):
             log_message(line)
+        legacy_required_bars = (
+            int(getattr(strategy, "warmup_bars", getattr(strategy, "window", 300))) + 10
+        )
+        legacy_candle_limit = max(
+            500,
+            legacy_required_bars + 100,
+            int(getattr(strategy, "entry_lookback", 0)) + 100,
+        )
+        if signal_filter:
+            slow_days = int(signal_filter.get("slow_days", 200))
+            filter_bars = (slow_days + 60) * (86400 // interval_seconds)
+            legacy_required_bars = max(legacy_required_bars, filter_bars)
+            legacy_candle_limit = max(legacy_candle_limit, filter_bars)
+            log_message(
+                "Signal filter: "
+                f"{signal_filter.get('type')} "
+                f"fast={signal_filter.get('fast_days', 50)} slow={slow_days}"
+            )
         v21_bull_s = v21_bear_s = v21_neutral_s = None
         v21_bull_cfg = v21_bear_cfg = v21_neutral_cfg = None
         v21_policy = ""
@@ -1591,10 +1639,14 @@ def main():
                     )
                     df = ensure_klines(exchange, symbol, args.interval, required_bars)
                 else:
-                    needed_bars = max(500, strategy.window + 100)
-                    df = fetch_candles(exchange, symbol, bar=args.interval, limit=needed_bars)
+                    if signal_filter:
+                        df = ensure_klines(exchange, symbol, args.interval, legacy_candle_limit)
+                    else:
+                        df = fetch_candles(
+                            exchange, symbol, bar=args.interval, limit=legacy_candle_limit
+                        )
 
-                if is_v21 and df is not None and not df.empty:
+                if (is_v21 or signal_filter) and df is not None and not df.empty:
                     interval_ms = interval_seconds * 1000
                     safety_delay_ms = 60000
                     last_ts = int(df["timestamp"].iloc[-1])
@@ -1607,7 +1659,7 @@ def main():
                 min_bars_ok = (
                     (df is not None and len(df) >= (max_strategy_window + 10))
                     if is_v21
-                    else (df is not None and len(df) >= strategy.window + 10)
+                    else (df is not None and len(df) >= legacy_required_bars)
                 )
                 if not min_bars_ok:
                     log_message("数据不足，跳过本轮")
@@ -1617,7 +1669,12 @@ def main():
                         ticker = exchange.fetch_ticker(symbol)
                         current_price = float(ticker.get("last", float(df.iloc[-1]["close"])))
                     else:
-                        signal_id, bb_info = predict_signal(strategy, df, enable_short=enable_short)
+                        signal_id, bb_info = predict_signal(
+                            strategy,
+                            df,
+                            enable_short=enable_short,
+                            signal_filter=signal_filter,
+                        )
                         current_price = bb_info["price"]
                     current_time = df.iloc[-1]["datetime"]
                     state["last_price"] = current_price
@@ -1662,8 +1719,38 @@ def main():
                             f"perm={v21_diag['permission_reason']} | "
                             f"overlay={v21_diag.get('exit_overlays_enabled', False)}"
                         )
+                        if timesfm_gate:
+                            signal_id, timesfm_info = timesfm_gate.apply(
+                                signal_id,
+                                df,
+                                current_position=int(state.get("position", 0)),
+                            )
+                            state["timesfm_gate_active"] = True
+                            state["timesfm_gate_checked"] = bool(timesfm_info.get("checked"))
+                            state["timesfm_gate_allowed"] = bool(timesfm_info.get("allowed"))
+                            state["timesfm_gate_reason"] = timesfm_info.get("reason", "")
+                            state["timesfm_gate_signal_before"] = timesfm_info.get(
+                                "input_signal"
+                            )
+                            state["timesfm_gate_signal_after"] = signal_id
+                            if timesfm_info.get("checked"):
+                                log_message(
+                                    "[TimesFM gate] "
+                                    f"{timesfm_info.get('reason')} "
+                                    f"{timesfm_info.get('input_signal')}->{signal_id} "
+                                    f"median={timesfm_info.get('median_return', 0):+.4%} "
+                                    f"q10={timesfm_info.get('q10_return', 0):+.4%} "
+                                    f"q90={timesfm_info.get('q90_return', 0):+.4%}"
+                                )
                     else:
                         log_message(f"K线时间: {current_time} | 价格: {current_price:.2f}")
+                        if bb_info.get("signal_filter"):
+                            state["signal_filter_regime"] = bb_info["regime"]
+                            state["signal_filter_raw_signal"] = bb_info["raw_signal"]
+                            log_message(
+                                f"Signal filter: regime={bb_info['regime']} "
+                                f"raw={bb_info['raw_signal']} final={bb_info['filtered_signal']}"
+                            )
                         log_message(
                             f"布林带: 上轨={bb_info['upper']:.2f} 中轨={bb_info['mid']:.2f} 下轨={bb_info['lower']:.2f}"
                         )

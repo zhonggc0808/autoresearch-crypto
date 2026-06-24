@@ -62,6 +62,8 @@ STRATEGY_ALIASES: dict[str, type] = {
 REGIME_CHANNEL_BREAKOUT_STRATEGY_TYPES = {
     "regime_permission_channel_breakout",
     "exit_logic_channel_breakout",
+    "position_sized_channel_breakout",
+    "drawdown_control_channel_breakout",
 }
 
 EXIT_LOGIC_STRATEGY_PARAM_FIELDS = (
@@ -228,6 +230,16 @@ def describe_strategy(strategy: Any, strategy_name: str) -> list[str]:
         "profit_lock_atr_multiplier",
         "profit_lock_atr_period",
         "profit_lock_min_hold_bars",
+        "bollinger_breakout_enabled",
+        "bollinger_window",
+        "bollinger_std_dev",
+        "retest_enabled",
+        "retest_window_bars",
+        "retest_tolerance_pct",
+        "retest_entry_delay_bars",
+        "retest_require_bollinger_confirmation",
+        "retest_min_reclaim_pct",
+        "retest_min_bollinger_distance_pct",
     ]
     values = [f"{field}={getattr(strategy, field)}" for field in fields if hasattr(strategy, field)]
     return [f"策略模式: {strategy_name}", "参数: " + ", ".join(values)]

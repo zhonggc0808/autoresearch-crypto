@@ -448,12 +448,71 @@ EXIT_LOGIC_VARIANT = FamilyDefinition(
         "exit_logic.profit_lock.giveback_ratio: [0.0, 1.0], default 0.35\n"
         "exit_logic.profit_lock.trailing_atr_multiplier: [0.0, 10.0], default 3.0\n"
         "exit_logic.profit_lock_by_regime.{bull,bear,neutral}: optional overrides\n"
+        "exit_logic.mature_trend_exit.enabled: true | false, required when present\n"
         "exit_logic.mature_trend_exit.activate_mfe_pct: [0.0, 5.0], default 1.20\n"
         "exit_logic.mature_trend_exit.daily_ema_period: [2, 200], default 20\n"
-        "exit_logic.bear_cooldown.loss_streak: [1, 10], default 2\n"
-        "exit_logic.bear_cooldown.cooldown_bars: [1, 2880], default 864\n"
+        "exit_logic.mature_trend_exit.use_completed_daily_bar: true only\n"
+        "exit_logic.bear_cooldown: CLOSED, do not use entry-blocking cooldowns\n"
         "regime_filter.fast_days: [5, 200], default 50\n"
         "regime_filter.slow_days: [10, 500], default 200"
+    ),
+)
+
+
+FIXED_POSITION_SCALER = FamilyDefinition(
+    name="fixed_position_scaler",
+    description="Regime-permission channel breakout with fixed fractional position sizing",
+    schema_file="fixed_position_scaler_v0.1.json",
+    strategy_type="position_sized_channel_breakout",
+    strategy_params={
+        "entry_lookback": ParamDef(int, 20, 1000),
+        "min_hold_bars": ParamDef(int, 12, 1440),
+        "enable_long": ParamDef(bool),
+        "enable_short": ParamDef(bool),
+    },
+    allowed_change={},
+    allowed_change_nested={
+        "position_sizing": {
+            "fixed_fraction": {"type": "float", "min": 0.05, "max": 1.00},
+        },
+    },
+    search_space_text=(
+        "position_sizing.mode: fixed_fraction\n"
+        "position_sizing.fixed_fraction: [0.05, 1.00], default 0.50\n"
+        "Keep entry_lookback=375 and min_hold_bars=432 unless explicitly justified.\n"
+        "regime_filter.fast_days: [5, 200], default 50\n"
+        "regime_filter.slow_days: [10, 500], default 200"
+    ),
+)
+
+
+DD_CONTROL_SCALER = FamilyDefinition(
+    name="drawdown_control_scaler",
+    description="Regime-permission channel breakout with close-drawdown position scaling",
+    schema_file="drawdown_control_scaler_v0.1.json",
+    strategy_type="drawdown_control_channel_breakout",
+    strategy_params={
+        "entry_lookback": ParamDef(int, 20, 1000),
+        "min_hold_bars": ParamDef(int, 12, 1440),
+        "enable_long": ParamDef(bool),
+        "enable_short": ParamDef(bool),
+    },
+    allowed_change={},
+    allowed_change_nested={
+        "position_sizing": {
+            "base_fraction": {"type": "float", "min": 0.05, "max": 1.00},
+            "reduced_fraction": {"type": "float", "min": 0.01, "max": 1.00},
+            "drawdown_threshold": {"type": "float", "min": 0.02, "max": 0.60},
+            "lookback_bars": {"type": "int", "min": 288, "max": 8064},
+        },
+    },
+    search_space_text=(
+        "position_sizing.mode: close_drawdown_scale\n"
+        "position_sizing.base_fraction: [0.05, 1.00], default 0.30\n"
+        "position_sizing.reduced_fraction: [0.01, 1.00], default 0.05\n"
+        "position_sizing.drawdown_threshold: [0.02, 0.60], default 0.15\n"
+        "position_sizing.lookback_bars: [288, 8064], default 2016\n"
+        "Keep entry_lookback=375 and min_hold_bars=432 unless explicitly justified."
     ),
 )
 
@@ -544,6 +603,34 @@ NEUTRAL_REGIME_ENTRY_BLOCK = FamilyDefinition(
 )
 
 
+TIMESFM_QUANTILE_GATE = FamilyDefinition(
+    name="timesfm_quantile_gate",
+    description="TimesFM forecast quantile gate for ChannelBreakout entries",
+    schema_file="timesfm_quantile_gate_v0.1.json",
+    strategy_type="timesfm_quantile_gate",
+    strategy_params={
+        "context": ParamDef(int, 32, 16384),
+        "horizon": ParamDef(int, 1, 288),
+        "min_edge_pct": ParamDef(float, -0.05, 0.05),
+        "risk_floor_pct": ParamDef(float, 0.0, 0.20),
+    },
+    allowed_change={
+        "min_edge_pct": {"type": "float", "min": -0.05, "max": 0.05},
+        "risk_floor_pct": {"type": "float", "min": 0.0, "max": 0.20},
+    },
+    allowed_change_nested={},
+    search_space_text=(
+        "TimesFM quantile gate applied to ChannelBreakout entries/reversals\n"
+        "base_variant: channel_breakout_v2_2_m375_bbm375_1p5 only\n"
+        "context: [32, 16384], default 1024\n"
+        "horizon: [1, 288], default 72\n"
+        "min_edge_pct: [-0.05, 0.05], default -0.01\n"
+        "risk_floor_pct: [0.0, 0.20], default 0.05"
+    ),
+    extra_fields=[],
+)
+
+
 # ---------------------------------------------------------------------------
 # Initialize
 # ---------------------------------------------------------------------------
@@ -551,6 +638,9 @@ NEUTRAL_REGIME_ENTRY_BLOCK = FamilyDefinition(
 register(CHANNEL_BREAKOUT)
 register(VOLATILITY_FILTERED_BREAKOUT)
 register(EXIT_LOGIC_VARIANT)
+register(FIXED_POSITION_SCALER)
+register(DD_CONTROL_SCALER)
 register(VOLATILITY_GATE)
 register(COOLDOWN_AFTER_DRAWDOWN)
 register(NEUTRAL_REGIME_ENTRY_BLOCK)
+register(TIMESFM_QUANTILE_GATE)

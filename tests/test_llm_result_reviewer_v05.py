@@ -19,8 +19,6 @@ import shutil
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 # ---------------------------------------------------------------------------
 # Module-level setup: install scorecard fixture for exp_0002
 # ---------------------------------------------------------------------------
@@ -275,6 +273,36 @@ class TestAllowedChangeValidation:
         del action["allowed_change"]
         errors = validate_action(action, verdict_label="kill")
         assert errors, "Expected error: fork requires allowed_change"
+
+    def test_exit_action_top_level_change_is_normalized(self):
+        from scripts.review_candidate import _normalize_action_fields, validate_action
+
+        action = {
+            "action": "fork",
+            "source_candidate_id": "exp_0001",
+            "target_family": "exit_logic_variant",
+            "rationale": "Testing exit logic action normalization for reviewer schema slips.",
+            "allowed_change": {"max_hold_bars": 720},
+        }
+        normalized = _normalize_action_fields(action)
+        assert normalized["allowed_change"] == {"exit_logic": {"max_hold_bars": 720}}
+        assert validate_action(normalized, verdict_label="kill") == []
+
+    def test_exit_action_atr_alias_is_normalized(self):
+        from scripts.review_candidate import _normalize_action_fields, validate_action
+
+        action = {
+            "action": "fork",
+            "source_candidate_id": "exp_0001",
+            "target_family": "exit_logic_variant",
+            "rationale": "Testing mature trend exit alias normalization for reviewer output.",
+            "allowed_change": {"exit_logic": {"atr_multiplier": 1.5}},
+        }
+        normalized = _normalize_action_fields(action)
+        assert normalized["allowed_change"] == {
+            "exit_logic": {"mature_trend_exit": {"activate_mfe_pct": 1.5}}
+        }
+        assert validate_action(normalized, verdict_label="kill") == []
 
 
 # ===================================================================

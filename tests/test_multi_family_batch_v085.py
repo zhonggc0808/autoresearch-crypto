@@ -20,13 +20,8 @@ Run:
 
 from __future__ import annotations
 
-import copy
 import json
-from collections import Counter
 from pathlib import Path
-from unittest.mock import patch
-
-import pytest
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 
@@ -153,6 +148,7 @@ class TestVFBTemplates:
 
     def test_vfb_candidate_no_forbidden_content(self):
         import re
+
         from scripts.run_batch_trial import VFB_CANDIDATE_TEMPLATE
         from scripts.validate_candidate_v02 import FORBIDDEN_PATTERNS
         for pattern_str, reason in FORBIDDEN_PATTERNS:
@@ -161,6 +157,7 @@ class TestVFBTemplates:
 
     def test_vfb_actions_no_forbidden_content(self):
         import re
+
         from scripts.run_batch_trial import VFB_ACTION_TEMPLATES
         from scripts.validate_candidate_v02 import FORBIDDEN_PATTERNS
         for action_type, template in VFB_ACTION_TEMPLATES.items():
@@ -318,6 +315,21 @@ class TestFamilyAnalysisBuilder:
         analysis = _build_family_analysis([])
         assert analysis == "(no family data)" or "no family" in analysis.lower()
 
+    def test_family_analysis_handles_missing_family(self):
+        from scripts.meta_review import _build_family_analysis
+
+        analysis = _build_family_analysis([
+            {
+                "run_id": "r_missing",
+                "family": None,
+                "candidate_id": "exp_0000",
+                "final_state": "executed_kill",
+                "steps": [{"step": "execute", "status": "ok", "action": "kill"}],
+            }
+        ])
+        assert "unknown" in analysis
+        assert "Candidates: 1" in analysis
+
     def test_family_analysis_multiple_runs_per_family(self):
         from scripts.meta_review import _build_family_analysis
 
@@ -346,7 +358,7 @@ class TestMetaReviewFamilyContext:
     """Verify meta-review context includes family-level data."""
 
     def test_context_has_family_analysis_placeholder_replaced(self):
-        from scripts.meta_review import collect_history, build_context
+        from scripts.meta_review import build_context, collect_history
 
         history = collect_history(n_runs=5)
         context = build_context(history, "meta_9999")
@@ -356,7 +368,7 @@ class TestMetaReviewFamilyContext:
             "FAMILY_ANALYSIS placeholder was not replaced"
 
     def test_family_analysis_section_exists(self):
-        from scripts.meta_review import collect_history, build_context
+        from scripts.meta_review import build_context, collect_history
 
         history = collect_history(n_runs=5)
         context = build_context(history, "meta_9999")
@@ -379,6 +391,7 @@ class TestCrossFamilyProtection:
 
     def test_fork_preserves_channel_breakout(self):
         import json as _json
+
         from scripts.execute_action import execute_action
 
         LLM_CANDIDATES_DIR = PROJECT_DIR / "research_workspace" / "llm_candidates"
@@ -432,6 +445,7 @@ class TestCrossFamilyProtection:
 
     def test_fork_preserves_volatility_filtered(self):
         import json as _json
+
         from scripts.execute_action import execute_action
 
         LLM_CANDIDATES_DIR = PROJECT_DIR / "research_workspace" / "llm_candidates"
@@ -643,7 +657,8 @@ class TestExitBatchTemplates:
 
     def test_exit_templates_no_forbidden_content(self):
         import re
-        from scripts.run_batch_trial import EXIT_CANDIDATE_TEMPLATE, EXIT_ACTION_TEMPLATES
+
+        from scripts.run_batch_trial import EXIT_ACTION_TEMPLATES, EXIT_CANDIDATE_TEMPLATE
         from scripts.validate_candidate_v02 import FORBIDDEN_PATTERNS
         all_text = EXIT_CANDIDATE_TEMPLATE
         for t in EXIT_ACTION_TEMPLATES.values():

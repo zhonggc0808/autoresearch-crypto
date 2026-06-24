@@ -9,20 +9,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sys
 import tempfile
-import shutil
 from pathlib import Path
 
-import pandas as pd
-
 import numpy as np
+import pandas as pd
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 import importlib.util
+
 _oracle_path = PROJECT_DIR / "scripts" / "research_oracle.py"
 _spec = importlib.util.spec_from_file_location("research_oracle", _oracle_path)
 research_oracle = importlib.util.module_from_spec(_spec)
@@ -146,6 +146,39 @@ def test_baseline_json_vs_pt_parity():
     print("  [PASS] JSON vs PT parity")
 
 
+def test_fixed_position_sizing_reduces_exposure():
+    sig = np.array([2, 1, 1, 0], dtype=int)
+    prices = np.array([100.0, 90.0, 80.0, 80.0])
+    full = research_oracle._evaluate_signals(sig, prices)
+    half = research_oracle._evaluate_signals(
+        sig,
+        prices,
+        position_sizes=np.full(len(sig), 0.5),
+    )
+
+    assert abs(half["dd"]) < abs(full["dd"])
+    assert half["return"] > full["return"]
+
+
+def test_close_drawdown_sizing_reduces_after_threshold():
+    df = pd.DataFrame({"close": [100.0, 95.0, 80.0, 82.0]})
+    sizes = research_oracle._position_sizes_from_config(
+        {
+            "position_sizing": {
+                "mode": "close_drawdown_scale",
+                "base_fraction": 0.30,
+                "reduced_fraction": 0.05,
+                "drawdown_threshold": 0.15,
+                "lookback_bars": 4,
+            }
+        },
+        len(df),
+        df,
+    )
+
+    assert sizes.tolist() == [0.30, 0.30, 0.05, 0.05]
+
+
 # --- Phase 3 candidate mode ---
 
 def test_candidate_mode():
@@ -206,8 +239,9 @@ def test_adx_filter_apply_to_subset():
 
 def test_adx_filter_unknown_type_raises():
     """Verify unknown filter type raises ValueError."""
-    from dex.filters import build_filter_from_config
     import numpy as np
+
+    from dex.filters import build_filter_from_config
     try:
         build_filter_from_config({"type": "nonexistent"}, np.array([]), np.array([]))
         assert False, "Should have raised ValueError"

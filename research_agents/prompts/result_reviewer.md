@@ -10,6 +10,7 @@ completed candidate evaluation and propose the next action.
 ### Candidate
 
 - **ID:** {{EXPERIMENT_ID}}
+- **Family:** {{TARGET_FAMILY}}
 - **Description:** {{DESCRIPTION}}
 - **Hypothesis:** {{HYPOTHESIS}}
 
@@ -46,7 +47,7 @@ Output ONLY a valid JSON object. No markdown, no code fences, no explanations.
 {
   "action": "<action_type>",
   "source_candidate_id": "<exp_NNNN or 'baseline'>",
-  "target_family": "channel_breakout",
+  "target_family": "{{TARGET_FAMILY}}",
   "rationale": "Clear explanation of why this action is appropriate (min 30 chars).",
   "allowed_change": {
     "regime_filter": { "fast_days": 50, "slow_days": 200 },
@@ -70,7 +71,9 @@ Output ONLY a valid JSON object. No markdown, no code fences, no explanations.
 ### Allowed Changes (for `fork` actions)
 
 When proposing a `fork`, describe what parameter(s) would change in `allowed_change`.
-Only these parameters are changeable:
+Use only fields valid for the candidate family shown above.
+
+For `channel_breakout`, these parameters are changeable:
 
 | Parameter | Range | Default (v2.1) |
 |-----------|-------|-----------------|
@@ -82,6 +85,19 @@ Only these parameters are changeable:
 You may also propose changes to `permission` flags (`enable_long`, `enable_short`,
 `directional_only`, `close_below_ema_disables_long`, etc.) but the values must
 be boolean or integer within schema bounds.
+
+For `exit_logic_variant`, prefer nested `exit_logic` changes such as
+`take_profit_pct`, `stop_loss_pct`, `max_hold_bars`, `trailing_stop`, or
+`profit_lock`. Do not fork into entry-blocking cooldowns.
+
+For `fixed_position_scaler`, use only:
+```json
+{"position_sizing": {"fixed_fraction": 0.50}}
+```
+Do not add exit logic, entry filters, or cooldowns.
+
+For `drawdown_control_scaler`, use only nested `position_sizing` changes:
+`base_fraction`, `reduced_fraction`, `drawdown_threshold`, or `lookback_bars`.
 
 ## Verdict-Action Constraints
 
@@ -110,5 +126,7 @@ them, it will be rejected.
 8. For `kill` verdicts: propose `fork` ONLY if the candidate materially
    improved at least one of rolling12m, fee@10bp, or max drawdown vs the
    closest prior candidate. If metrics are identical or worse, propose `kill`.
+   Do not claim "no material improvement" when Recent Results show better
+   rolling12m, less negative DD, or better fee@10bp than the closest prior.
 9. `stable` is only appropriate when no improvement path is visible.
-9. If you cannot determine an action, output: `{"action": "create", "source_candidate_id": "baseline", "target_family": "channel_breakout", "rationale": "Cannot determine next step from available data."}`
+9. If you cannot determine an action, output: `{"action": "create", "source_candidate_id": "baseline", "target_family": "{{TARGET_FAMILY}}", "rationale": "Cannot determine next step from available data."}`

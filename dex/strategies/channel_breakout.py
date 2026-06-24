@@ -48,6 +48,16 @@ class ChannelBreakoutTrendStrategy(BaseStrategy):
         profit_lock_atr_multiplier: float = 0.0,
         profit_lock_atr_period: int = 14,
         profit_lock_min_hold_bars: int = 0,
+        bollinger_breakout_enabled: bool = False,
+        bollinger_window: int = 20,
+        bollinger_std_dev: float = 2.0,
+        retest_enabled: bool = False,
+        retest_window_bars: int = 0,
+        retest_tolerance_pct: float = 0.0,
+        retest_entry_delay_bars: int = 1,
+        retest_require_bollinger_confirmation: bool = False,
+        retest_min_reclaim_pct: float = 0.0,
+        retest_min_bollinger_distance_pct: float = 0.0,
     ) -> None:
         if enable_short_alias is not None:
             enable_short = enable_short_alias
@@ -77,6 +87,36 @@ class ChannelBreakoutTrendStrategy(BaseStrategy):
         self.profit_lock_atr_multiplier = profit_lock_atr_multiplier
         self.profit_lock_atr_period = profit_lock_atr_period
         self.profit_lock_min_hold_bars = profit_lock_min_hold_bars
+        self.bollinger_breakout_enabled = bollinger_breakout_enabled
+        self.bollinger_window = int(bollinger_window)
+        self.bollinger_std_dev = float(bollinger_std_dev)
+        self.retest_enabled = bool(retest_enabled)
+        self.retest_window_bars = int(retest_window_bars)
+        self.retest_tolerance_pct = float(retest_tolerance_pct)
+        self.retest_entry_delay_bars = int(retest_entry_delay_bars)
+        self.retest_require_bollinger_confirmation = bool(retest_require_bollinger_confirmation)
+        self.retest_min_reclaim_pct = float(retest_min_reclaim_pct)
+        self.retest_min_bollinger_distance_pct = float(retest_min_bollinger_distance_pct)
+
+        if self.bollinger_breakout_enabled and self.bollinger_window <= 1:
+            raise ValueError("bollinger_window must be > 1 when Bollinger breakout is enabled")
+        if self.bollinger_std_dev <= 0:
+            raise ValueError("bollinger_std_dev must be > 0")
+        if self.retest_enabled:
+            if self.retest_window_bars <= 0:
+                raise ValueError("retest_window_bars must be > 0 when retest is enabled")
+            if self.retest_tolerance_pct < 0:
+                raise ValueError("retest_tolerance_pct must be >= 0")
+            if self.retest_entry_delay_bars < 1:
+                raise ValueError("retest_entry_delay_bars must be >= 1")
+            if self.retest_min_reclaim_pct < 0:
+                raise ValueError("retest_min_reclaim_pct must be >= 0")
+            if self.retest_min_bollinger_distance_pct < 0:
+                raise ValueError("retest_min_bollinger_distance_pct must be >= 0")
+            if self.retest_require_bollinger_confirmation and not self.bollinger_breakout_enabled:
+                raise ValueError(
+                    "retest_require_bollinger_confirmation requires bollinger_breakout_enabled"
+                )
 
         atr_window = atr_period if breakout_atr_buffer > 0 else 0
         profit_lock_atr_window = (
@@ -93,9 +133,49 @@ class ChannelBreakoutTrendStrategy(BaseStrategy):
             atr_window,
             profit_lock_atr_window,
             adx_window,
+            self.bollinger_window if self.bollinger_breakout_enabled else 0,
         )
         self.warmup_bars = self.window
         self.std_dev = 2.0
+
+    def _retest_confirmed(
+        self,
+        direction: int,
+        i: int,
+        trigger_price: float,
+        close: np.ndarray,
+        high: np.ndarray,
+        low: np.ndarray,
+        bollinger_upper: np.ndarray | None,
+        bollinger_lower: np.ndarray | None,
+    ) -> bool:
+        if not np.isfinite(trigger_price):
+            return False
+
+        price = close[i]
+        if direction > 0:
+            touched = low[i] <= trigger_price * (1.0 + self.retest_tolerance_pct)
+            held_breakout = price > trigger_price * (1.0 + self.retest_min_reclaim_pct)
+            bollinger_valid = True
+            if self.retest_require_bollinger_confirmation:
+                bollinger_valid = (
+                    bollinger_upper is not None
+                    and np.isfinite(bollinger_upper[i])
+                    and price
+                    > bollinger_upper[i] * (1.0 + self.retest_min_bollinger_distance_pct)
+                )
+            return bool(touched and held_breakout and bollinger_valid)
+
+        touched = high[i] >= trigger_price * (1.0 - self.retest_tolerance_pct)
+        held_breakout = price < trigger_price * (1.0 - self.retest_min_reclaim_pct)
+        bollinger_valid = True
+        if self.retest_require_bollinger_confirmation:
+            bollinger_valid = (
+                bollinger_lower is not None
+                and np.isfinite(bollinger_lower[i])
+                and price < bollinger_lower[i] * (1.0 - self.retest_min_bollinger_distance_pct)
+            )
+        return bool(touched and held_breakout and bollinger_valid)
 
     def generate_signals(self, df: pd.DataFrame, enable_short: bool = True) -> np.ndarray:
         close = df["close"].values.astype(float)
@@ -115,6 +195,24 @@ class ChannelBreakoutTrendStrategy(BaseStrategy):
         )
         channel_high = rolling_high.shift(1).to_numpy()
         channel_low = rolling_low.shift(1).to_numpy()
+
+        bollinger_upper = bollinger_lower = None
+        if self.bollinger_breakout_enabled:
+            close_series = pd.Series(close)
+            bollinger_mid = close_series.rolling(
+                self.bollinger_window,
+                min_periods=self.bollinger_window,
+            ).mean()
+            bollinger_std = close_series.rolling(
+                self.bollinger_window,
+                min_periods=self.bollinger_window,
+            ).std()
+            bollinger_upper = (
+                bollinger_mid + self.bollinger_std_dev * bollinger_std
+            ).shift(1).to_numpy()
+            bollinger_lower = (
+                bollinger_mid - self.bollinger_std_dev * bollinger_std
+            ).shift(1).to_numpy()
 
         exit_high = exit_low = None
         if self.exit_lookback > 0:
@@ -152,11 +250,73 @@ class ChannelBreakoutTrendStrategy(BaseStrategy):
         profit_lock_active = False
         last_exit_bar = -self.cooldown_bars
         allow_short = self.enable_short and enable_short
+        pending_retest_dir = 0
+        pending_retest_bar = -1
+        pending_retest_trigger = 0.0
+        scheduled_entry_dir = 0
+        scheduled_entry_bar = -1
 
         for i in range(self.window, n):
             price = close[i]
             can_flip = i - entry_bar >= self.min_hold_bars
             can_enter = i - last_exit_bar >= self.cooldown_bars
+
+            if (
+                self.retest_enabled
+                and scheduled_entry_dir != 0
+                and position == 0
+                and i >= scheduled_entry_bar
+                and can_enter
+            ):
+                if scheduled_entry_dir > 0 and self.enable_long:
+                    signals[i] = 2
+                    position = 1
+                elif scheduled_entry_dir < 0 and allow_short:
+                    signals[i] = 3
+                    position = -1
+                else:
+                    scheduled_entry_dir = 0
+                    scheduled_entry_bar = -1
+
+                if position != 0:
+                    entry_bar = i
+                    entry_price = price
+                    highest_after_entry = high[i]
+                    lowest_after_entry = low[i]
+                    mfe_pct = 0.0
+                    profit_lock_active = False
+                    scheduled_entry_dir = 0
+                    scheduled_entry_bar = -1
+                    pending_retest_dir = 0
+                    pending_retest_bar = -1
+                    pending_retest_trigger = 0.0
+                    continue
+
+            if (
+                self.retest_enabled
+                and pending_retest_dir != 0
+                and position == 0
+                and scheduled_entry_dir == 0
+            ):
+                if i - pending_retest_bar > self.retest_window_bars:
+                    pending_retest_dir = 0
+                    pending_retest_bar = -1
+                    pending_retest_trigger = 0.0
+                elif i > pending_retest_bar and self._retest_confirmed(
+                    pending_retest_dir,
+                    i,
+                    pending_retest_trigger,
+                    close,
+                    high,
+                    low,
+                    bollinger_upper,
+                    bollinger_lower,
+                ):
+                    scheduled_entry_dir = pending_retest_dir
+                    scheduled_entry_bar = i + self.retest_entry_delay_bars
+                    pending_retest_dir = 0
+                    pending_retest_bar = -1
+                    pending_retest_trigger = 0.0
             trend_allows_long = True
             trend_allows_short = True
             if trend_ma is not None:
@@ -185,11 +345,22 @@ class ChannelBreakoutTrendStrategy(BaseStrategy):
             atr_buffer = self.breakout_atr_buffer * atr[i] if atr is not None else 0.0
             long_trigger = channel_high[i] * (1.0 + self.breakout_buffer_pct) + atr_buffer
             short_trigger = channel_low[i] * (1.0 - self.breakout_buffer_pct) - atr_buffer
+            bollinger_allows_long = True
+            bollinger_allows_short = True
+            if bollinger_upper is not None and bollinger_lower is not None:
+                bollinger_allows_long = (
+                    np.isfinite(bollinger_upper[i]) and price > bollinger_upper[i]
+                )
+                bollinger_allows_short = (
+                    np.isfinite(bollinger_lower[i]) and price < bollinger_lower[i]
+                )
+
             long_break = (
                 self.enable_long
                 and trend_strength_ok
                 and trend_allows_long
                 and di_allows_long
+                and bollinger_allows_long
                 and price > long_trigger
             )
             short_break = (
@@ -197,6 +368,7 @@ class ChannelBreakoutTrendStrategy(BaseStrategy):
                 and trend_strength_ok
                 and trend_allows_short
                 and di_allows_short
+                and bollinger_allows_short
                 and price < short_trigger
             )
 
@@ -244,6 +416,15 @@ class ChannelBreakoutTrendStrategy(BaseStrategy):
                     last_exit_bar = i
                     continue
                 if can_flip and short_break:
+                    if self.retest_enabled:
+                        signals[i] = 0
+                        position = 0
+                        pending_retest_dir = -1
+                        pending_retest_bar = i
+                        pending_retest_trigger = short_trigger
+                        scheduled_entry_dir = 0
+                        scheduled_entry_bar = -1
+                        continue
                     signals[i] = 3
                     position = -1
                     entry_bar = i
@@ -300,6 +481,15 @@ class ChannelBreakoutTrendStrategy(BaseStrategy):
                     last_exit_bar = i
                     continue
                 if can_flip and long_break:
+                    if self.retest_enabled:
+                        signals[i] = 0
+                        position = 0
+                        pending_retest_dir = 1
+                        pending_retest_bar = i
+                        pending_retest_trigger = long_trigger
+                        scheduled_entry_dir = 0
+                        scheduled_entry_bar = -1
+                        continue
                     signals[i] = 2
                     position = 1
                     entry_bar = i
@@ -314,7 +504,16 @@ class ChannelBreakoutTrendStrategy(BaseStrategy):
 
             if not can_enter:
                 continue
+            if self.retest_enabled and (scheduled_entry_dir != 0 or pending_retest_dir != 0):
+                continue
             if long_break:
+                if self.retest_enabled:
+                    pending_retest_dir = 1
+                    pending_retest_bar = i
+                    pending_retest_trigger = long_trigger
+                    scheduled_entry_dir = 0
+                    scheduled_entry_bar = -1
+                    continue
                 signals[i] = 2
                 position = 1
                 entry_bar = i
@@ -324,6 +523,13 @@ class ChannelBreakoutTrendStrategy(BaseStrategy):
                 mfe_pct = 0.0
                 profit_lock_active = False
             elif short_break:
+                if self.retest_enabled:
+                    pending_retest_dir = -1
+                    pending_retest_bar = i
+                    pending_retest_trigger = short_trigger
+                    scheduled_entry_dir = 0
+                    scheduled_entry_bar = -1
+                    continue
                 signals[i] = 3
                 position = -1
                 entry_bar = i

@@ -176,6 +176,8 @@ def _zscore(series: pd.Series, window: int) -> pd.Series:
 def _hourly_derivatives(df: pd.DataFrame) -> pd.DataFrame:
     data = df.copy()
     data["available_at"] = pd.to_datetime(data["available_at"], errors="coerce")
+    if "open_interest" not in data.columns:
+        data["open_interest"] = np.nan
     data = data.dropna(subset=["available_at"]).sort_values("available_at")
     hourly = (
         data.set_index("available_at")
@@ -210,13 +212,17 @@ def fetch_derivatives_stats(symbol: str, since: pd.Timestamp, until: pd.Timestam
         since_ms,
         until_ms,
     )
-    oi = _fetch_paginated(
-        lambda start: exchange.fetch_open_interest_history(
-            market_symbol, timeframe="1h", since=start, limit=500
-        ),
-        since_ms,
-        until_ms,
-    )
+    try:
+        oi = _fetch_paginated(
+            lambda start: exchange.fetch_open_interest_history(
+                market_symbol, timeframe="1h", since=start, limit=500
+            ),
+            since_ms,
+            until_ms,
+        )
+    except Exception as exc:
+        print(f"warning: open-interest history unavailable, continuing funding-only: {exc}")
+        oi = []
 
     funding_df = pd.DataFrame(
         {

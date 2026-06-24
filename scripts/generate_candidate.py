@@ -85,6 +85,13 @@ def _resolve_strategy_from_params(params: Dict[str, Any]) -> str:
         from scripts.family_registry import get as _reg_get
 
         st = params.get("strategy_type", "")
+        sizing = params.get("position_sizing")
+        if st == "drawdown_control_channel_breakout" or (
+            isinstance(sizing, dict) and sizing.get("mode") == "close_drawdown_scale"
+        ):
+            return "drawdown_control_scaler"
+        if st == "position_sized_channel_breakout" or "position_sizing" in params:
+            return "fixed_position_scaler"
         if st:
             for name in _list_families_from_registry():
                 fd = _reg_get(name)
@@ -149,6 +156,18 @@ def _load_recent_results(n: int = 10) -> str:
             parts_clean.append(f"DISQUAL:{disqual}")
         elif warnings:
             parts_clean.append(f"WARN:{warnings}")
+        metrics = []
+        for label, key in (
+            ("roll12", "rolling_12m_min"),
+            ("is_dd", "is_dd"),
+            ("fee10", "fee_10bp_return"),
+            ("corr", "corr_vs_baseline"),
+        ):
+            value = row.get(key)
+            if value not in (None, ""):
+                metrics.append(f"{label}:{value}")
+        if metrics:
+            parts_clean.append(" ".join(metrics))
         summaries.append(" | ".join(parts_clean))
 
     return "\n".join(summaries)
@@ -174,7 +193,7 @@ def _get_next_experiment_id() -> str:
 def build_context(
     experiment_id: str,
     parent_id: str = "channel_breakout_v2_1_balanced",
-    family: str = "channel_breakout",
+    family: str = "drawdown_control_scaler",
 ) -> str:
     """Build the full context string for the LLM prompt."""
     template = _load_prompt_template()
@@ -286,6 +305,20 @@ def _normalize_filter_fields(flt: Dict[str, Any]) -> Dict[str, Any]:
     return flt
 
 
+def _normalize_params_fields(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Fill schema-implied fields LLMs commonly omit."""
+    exit_logic = params.get("exit_logic")
+    if not isinstance(exit_logic, dict):
+        return params
+
+    mature = exit_logic.get("mature_trend_exit")
+    if isinstance(mature, dict):
+        mature.setdefault("enabled", True)
+        mature.setdefault("use_completed_daily_bar", True)
+
+    return params
+
+
 def _build_full_candidate(
     experiment_id: str,
     llm_proposal: Dict[str, Any],
@@ -295,7 +328,7 @@ def _build_full_candidate(
     candidate["experiment_id"] = experiment_id
 
     # Resolve strategy from params.strategy_type via family registry
-    params = llm_proposal.get("params", {})
+    params = _normalize_params_fields(llm_proposal.get("params", {}))
     candidate["strategy"] = _resolve_strategy_from_params(params)
 
     # Copy fields from LLM proposal (with fallbacks)
@@ -310,7 +343,7 @@ def _build_full_candidate(
 
     # Copy params
     if "params" in llm_proposal:
-        candidate["params"] = llm_proposal["params"]
+        candidate["params"] = params
 
     # Copy execution if provided
     if "execution" in llm_proposal:

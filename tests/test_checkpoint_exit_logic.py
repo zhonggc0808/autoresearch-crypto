@@ -52,6 +52,14 @@ def test_exit_logic_channel_breakout_is_v21_compatible_checkpoint() -> None:
     assert is_regime_channel_breakout_checkpoint(checkpoint)
 
 
+def test_position_sized_channel_breakout_is_v21_compatible_checkpoint() -> None:
+    checkpoint = _checkpoint_with_exit_logic()
+    checkpoint["strategy_type"] = "position_sized_channel_breakout"
+    checkpoint["position_sizing"] = {"mode": "fixed_fraction", "fixed_fraction": 0.5}
+
+    assert is_regime_channel_breakout_checkpoint(checkpoint)
+
+
 def test_profit_lock_exit_logic_maps_to_strategy_params_without_mutating_input() -> None:
     checkpoint = _checkpoint_with_exit_logic()
     original = dict(checkpoint["bull"]["strategy_params"])

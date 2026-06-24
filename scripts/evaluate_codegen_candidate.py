@@ -377,9 +377,13 @@ def _compute_flags(metrics: Dict[str, Any]) -> Dict[str, Any]:
         disqualifications.append("IS drawdown exceeds -40%")
     if oos_raw.get("dd", 0) <= -0.50:
         disqualifications.append("OOS drawdown exceeds -50%")
+    if is_raw.get("trades_per_year", 0) > 300:
+        disqualifications.append("Trade frequency exceeds 300/yr codegen cap")
+    if is_raw.get("trades_per_year", 0) < 20:
+        disqualifications.append("Trade frequency below 20/yr codegen floor")
 
     # Warnings
-    if is_raw.get("trades_per_year", 0) < 10:
+    if 20 <= is_raw.get("trades_per_year", 0) < 30:
         warnings.append("Low trade frequency")
     r12m = rolling.get("12m_min_return")
     if r12m is not None and r12m < 0:
@@ -581,7 +585,8 @@ def evaluate_codegen_candidate(
 
     print(f"  Strategy: {manifest.get('strategy_name', '?')}")
     desc = manifest.get("description", "?")
-    print(f"  Description: {desc[:80]}{'...' if len(desc) > 80 else ''}")
+    desc_preview = f"{desc[:80]}{'...' if len(desc) > 80 else ''}"
+    print(f"  Description: {desc_preview.encode('ascii', 'replace').decode('ascii')}")
 
     print("\n[Phase 1] Re-verifying candidate ...")
     try:
