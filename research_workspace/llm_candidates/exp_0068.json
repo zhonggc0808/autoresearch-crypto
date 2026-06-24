@@ -1,0 +1,12 @@
+{
+  "experiment_id": "exp_0068",
+  "params": {
+    "strategy_type": "timesfm_quantile_gate",
+    "base_variant": "channel_breakout_v2_2_m375_bbm375_1p5",
+    "model_id": "google/timesfm-2.5-200m-pytorch",
+    "context": 1024,
+    "horizon": 72,
+    "min_edge_pct": -0.01,
+    "risk_floor_pct": 0.05
+  }
+}
