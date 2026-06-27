@@ -1,0 +1,4 @@
+interface:
+  display_name: "Save Code"
+  short_description: "Commit, push, and archive the project safely."
+  default_prompt: "Use $save-code to save the current code by reviewing changes, committing, pushing to GitHub, and creating a runtime archive."
