@@ -1,0 +1,34 @@
+{
+  "experiment_id": "exp_0093",
+  "parent_id": "exp_0092",
+  "candidate_role": "filter",
+  "strategy": "moirai2_quantile_gate",
+  "base": "channel_breakout_v2_2_m375_bbm375_1p5",
+  "status": "demo_live_runtime_config",
+  "source_candidate_id": "exp_0093",
+  "hypothesis": "Moirai2-small close-only quantile forecasts can block fewer but higher-quality losing ChannelBreakout entries than TimesFM 0068.",
+  "constraints": [
+    "no_future_data",
+    "completed_bar_only",
+    "demo_live_runtime",
+    "external_model_gate",
+    "not_ev_rank"
+  ],
+  "expected_behavior_change": "At base entries and reversals, allow the trade unless the 72-bar Moirai2 forecast median and risk quantiles fail the price/quantile gate; a blocked reversal closes to flat.",
+  "fallback_candidate": "configs/live/timesfm_gate_exp_0068.json",
+  "params": {
+    "strategy_type": "moirai2_quantile_gate",
+    "base_variant": "channel_breakout_v2_2_m375_bbm375_1p5",
+    "model_family": "moirai2",
+    "model_id": "research_workspace/diagnostics/moirai_2_small",
+    "source_model": "Salesforce/moirai-2.0-R-small",
+    "input": "close_only",
+    "context": 1024,
+    "horizon": 72,
+    "min_edge_pct": -0.02,
+    "risk_floor_pct": 0.04,
+    "action": "block_forecast_bad_entries",
+    "decision_scope": "entries_and_reversals",
+    "forecast_price_field": "close"
+  }
+}

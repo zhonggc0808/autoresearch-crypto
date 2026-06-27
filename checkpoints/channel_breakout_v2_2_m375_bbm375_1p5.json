@@ -12,19 +12,6 @@
     "slow_days": 200
   },
   "exit_logic": {
-    "exit_lookback": 0,
-    "take_profit_pct": 0.05,
-    "stop_loss_pct": 0.1,
-    "max_hold_bars": 720,
-    "trailing_stop": true,
-    "profit_lock": {
-      "enabled": false,
-      "activate_profit_pct": 0.2,
-      "giveback_ratio": 0.8,
-      "trailing_atr_multiplier": 0.0,
-      "atr_period": 14,
-      "min_hold_bars_before_lock": 0
-    },
     "mature_trend_exit": {
       "enabled": true,
       "activate_mfe_pct": 1.2,

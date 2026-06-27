@@ -1,4 +1,4 @@
-"""Live TimesFM gate for blocking weak ChannelBreakout entries."""
+"""Live forecast gate for blocking weak ChannelBreakout entries."""
 
 from __future__ import annotations
 
@@ -43,10 +43,31 @@ def blocked_signal(current_position: int) -> int:
     return 0 if current_position else 1
 
 
+def moirai2_quantile_forecast(
+    quantiles: Any,
+    *,
+    horizon: int,
+    spot: float,
+) -> dict[str, float]:
+    arr = np.asarray(quantiles, dtype=float)
+    q = arr[0]
+    vals = q[:, horizon - 1]
+    if vals.ndim > 1:
+        vals = vals[:, 0]
+    return {
+        "spot": spot,
+        "median_return": float(vals[4] / spot - 1.0),
+        "q10_return": float(vals[0] / spot - 1.0),
+        "q90_return": float(vals[8] / spot - 1.0),
+    }
+
+
 @dataclass
 class TimesFMLiveGate:
     candidate_id: str
     base_variant: str
+    strategy_type: str
+    model_family: str
     model_id: str
     model_source: str
     context: int
@@ -68,23 +89,29 @@ class TimesFMLiveGate:
     ) -> "TimesFMLiveGate":
         spec = json.loads(Path(candidate_path).read_text(encoding="utf-8"))
         params = spec.get("params", {})
-        if params.get("strategy_type") != "timesfm_quantile_gate":
-            raise ValueError(f"{candidate_path} is not a timesfm_quantile_gate candidate")
+        strategy_type = str(params.get("strategy_type", ""))
+        if strategy_type not in {"timesfm_quantile_gate", "moirai2_quantile_gate"}:
+            raise ValueError(f"{candidate_path} is not a supported live quantile gate candidate")
         base_variant = str(params.get("base_variant", ""))
         if base_variant != checkpoint_variant:
             raise ValueError(
-                f"TimesFM candidate base_variant={base_variant!r} "
+                f"Gate candidate base_variant={base_variant!r} "
                 f"does not match checkpoint variant={checkpoint_variant!r}"
             )
+        model_family = "moirai2" if strategy_type == "moirai2_quantile_gate" else "timesfm"
+        if model_family == "moirai2":
+            model_source = str(params["model_id"])
         model_path = Path(model_source)
         if model_path.exists():
             model_source = str(model_path)
         elif os.sep in model_source or "/" in model_source:
-            raise FileNotFoundError(f"TimesFM model path not found: {model_source}")
+            raise FileNotFoundError(f"Gate model path not found: {model_source}")
 
         gate = cls(
             candidate_id=str(spec.get("experiment_id", Path(candidate_path).stem)),
             base_variant=base_variant,
+            strategy_type=strategy_type,
+            model_family=model_family,
             model_id=str(params["model_id"]),
             model_source=model_source,
             context=int(params["context"]),
@@ -107,6 +134,8 @@ class TimesFMLiveGate:
         info: dict[str, Any] = {
             "active": True,
             "candidate_id": self.candidate_id,
+            "strategy_type": self.strategy_type,
+            "model_family": self.model_family,
             "input_signal": int(signal_id),
             "output_signal": int(signal_id),
             "checked": False,
@@ -140,7 +169,7 @@ class TimesFMLiveGate:
 
     def _forecast_latest(self, df: pd.DataFrame) -> dict[str, float]:
         if len(df) < 32:
-            raise ValueError("not enough bars for TimesFM forecast")
+            raise ValueError("not enough bars for forecast")
         close = df["close"].to_numpy(dtype=float)
         spot = float(close[-1])
         key = self._cache_key(df, spot)
@@ -150,13 +179,20 @@ class TimesFMLiveGate:
 
         model = self._load_model()
         inputs = [close[-self.context :].astype(np.float32)]
-        point, quantiles = model.forecast(horizon=self.horizon, inputs=inputs)
-        forecast = {
-            "spot": spot,
-            "median_return": float(point[0, self.horizon - 1] / spot - 1.0),
-            "q10_return": float(quantiles[0, self.horizon - 1, 1] / spot - 1.0),
-            "q90_return": float(quantiles[0, self.horizon - 1, 9] / spot - 1.0),
-        }
+        if self.model_family == "moirai2":
+            forecast = moirai2_quantile_forecast(
+                model.predict(inputs),
+                horizon=self.horizon,
+                spot=spot,
+            )
+        else:
+            point, quantiles = model.forecast(horizon=self.horizon, inputs=inputs)
+            forecast = {
+                "spot": spot,
+                "median_return": float(point[0, self.horizon - 1] / spot - 1.0),
+                "q10_return": float(quantiles[0, self.horizon - 1, 1] / spot - 1.0),
+                "q90_return": float(quantiles[0, self.horizon - 1, 9] / spot - 1.0),
+            }
         self._cache[key] = forecast
         self._save_cache()
         return forecast
@@ -193,6 +229,25 @@ class TimesFMLiveGate:
         # ponytail: current local torch may not support newest laptop GPUs; live gate can run CPU.
         torch.cuda.is_available = lambda: False
         torch.set_float32_matmul_precision("high")
+        if self.model_family == "moirai2":
+            try:
+                moirai2 = importlib.import_module("uni2ts.model.moirai2")
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Moirai2 live gate requires uni2ts. "
+                    "Run live with: uv run --with uni2ts python <live_script>.py ..."
+                ) from exc
+            module = moirai2.Moirai2Module.from_pretrained(self.model_source)
+            self._model = moirai2.Moirai2Forecast(
+                prediction_length=self.horizon,
+                target_dim=1,
+                feat_dynamic_real_dim=0,
+                past_feat_dynamic_real_dim=0,
+                context_length=self.context,
+                module=module,
+            )
+            return self._model
+
         timesfm = importlib.import_module("timesfm")
         model = timesfm.TimesFM_2p5_200M_torch.from_pretrained(self.model_source)
         model.compile(

@@ -25,13 +25,13 @@ $Checkpoint = Join-Path $ProjectRoot "checkpoints\channel_breakout_v2_2_m375_bbm
 if (-not (Test-Path $Checkpoint)) {
     throw "Missing checkpoint profile: $Checkpoint"
 }
-$TimesfmCandidate = Join-Path $ProjectRoot "research_workspace\llm_candidates\exp_0068.json"
-$TimesfmModel = Join-Path $ProjectRoot "research_workspace\diagnostics\timesfm_local_model"
+$TimesfmCandidate = Join-Path $ProjectRoot "configs\live\moirai2_gate_exp_0093.json"
+$TimesfmModel = Join-Path $ProjectRoot "research_workspace\diagnostics\moirai_2_small"
 if ($TimesfmGate -and -not (Test-Path $TimesfmCandidate)) {
-    throw "Missing TimesFM candidate: $TimesfmCandidate"
+    throw "Missing forecast gate candidate: $TimesfmCandidate"
 }
 if ($TimesfmGate -and -not (Test-Path $TimesfmModel)) {
-    throw "Missing TimesFM local model: $TimesfmModel"
+    throw "Missing forecast gate local model: $TimesfmModel"
 }
 
 $UvCommand = Get-Command uv -ErrorAction SilentlyContinue
@@ -45,8 +45,11 @@ if ($UvCommand) {
 }
 
 $Notional = $Capital * $Leverage
-$ArgsList = @(
-    "run",
+$ArgsList = @("run")
+if ($TimesfmGate) {
+    $ArgsList += @("--with", "uni2ts")
+}
+$ArgsList += @(
     "python",
     "live_okx_quant.py",
     "--symbol", $Symbol,
@@ -88,7 +91,7 @@ Write-Host "Sizing:   clamp to exchange available USDT with 2% reserve"
 Write-Host "Mode:     Demo trading"
 Write-Host "Profile:  $Profile"
 Write-Host "Overlays: $(-not $DisableExitOverlays)"
-Write-Host "TimesFM:  $TimesfmGate"
+Write-Host "Gate:     $(if ($TimesfmGate) { 'Moirai2 exp_0093' } else { 'disabled' })"
 
 & $UvPath @ArgsList
 exit $LASTEXITCODE
