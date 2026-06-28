@@ -1,0 +1,4 @@
+interface:
+  display_name: "Live Change Guard"
+  short_description: "Require explicit approval before live trading changes."
+  default_prompt: "Check whether this task touches live trading, checkpoints, exchange routing, or production strategy files before editing."

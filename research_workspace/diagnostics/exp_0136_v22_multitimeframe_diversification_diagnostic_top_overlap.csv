@@ -1,0 +1,6 @@
+left,left_contribution_overlap,right,right_contribution_overlap,top20_overlap_by_month,top20_overlap_by_quarter,top20_overlap_count_left,top20_overlap_count_right
+5m_v22_moirai_baseline,0.13675856703070102,15m_core_donchian,0.030670663983108998,1,1,1,1
+5m_v22_moirai_baseline,0.0,1h_core_donchian,0.0,0,0,0,0
+5m_v22_moirai_baseline,0.0,1h_core_donchian_fast,0.0,0,0,0,0
+5m_core_donchian,0.8537548564919429,15m_core_donchian,0.871711070767536,14,8,17,16
+15m_core_donchian,0.9019920912448285,1h_core_donchian,0.9170558396572143,14,7,17,17

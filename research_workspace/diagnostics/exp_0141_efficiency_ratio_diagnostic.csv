@@ -1,0 +1,2 @@
+er_windows,experiment_id,full_return,max_dd,oos_return,oos_trade_count,overall_stage0_verdict,rolling12_min,sizing_action,skip_action,stage,trade_count,trading_action
+"20,50,100",exp_0141_efficiency_ratio_diagnostic,422.85033690044395,-0.5111768933334904,6.297163391937761,103,MIXED_HIGH_VARIANCE_BUCKET,-0.23478767887578278,none,none,stage0_only,236,none

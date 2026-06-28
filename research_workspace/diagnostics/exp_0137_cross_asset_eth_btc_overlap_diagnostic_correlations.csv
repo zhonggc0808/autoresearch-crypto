@@ -1,0 +1,2 @@
+daily_return_corr,left,monthly_return_corr,right,rolling180_corr_max,rolling180_corr_mean,rolling90_corr_max,rolling90_corr_mean
+0.2520632045088251,ETH_v22_moirai_overlap,0.27472430051213487,BTC_core_donchian_overlap,0.5610628523025647,0.20188736337598914,0.7272750932936363,0.20556149666944462

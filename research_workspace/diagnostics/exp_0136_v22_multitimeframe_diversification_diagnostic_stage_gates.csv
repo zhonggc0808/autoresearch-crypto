@@ -1,0 +1,4 @@
+any_fixed_combo_pass,enough_sample,low_corr_vs_v22,not_sync_deep_loss_in_v22_maxdd,oos_positive,sleeve,stage2_ready,top20_misaligned
+False,True,True,False,True,15m_core_donchian,False,True
+False,True,True,False,True,1h_core_donchian,False,True
+False,True,True,True,True,1h_core_donchian_fast,False,True

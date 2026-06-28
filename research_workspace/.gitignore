@@ -16,6 +16,14 @@ experiments.jsonl
 # Sensitivity sweep outputs (regenerated on demand)
 regime_sensitivity/
 
+# Local model weights/caches for shadow experiments
+diagnostics/timesfm_local_model/
+diagnostics/chronos_*/
+diagnostics/chronos_bolt_*/
+diagnostics/moirai_*/
+diagnostics/*/model.safetensors
+diagnostics/timesfm_*_cache.json
+
 # Keep baseline params (committed frozen reference) and templates
 !baselines/*_params.json
 !.gitkeep

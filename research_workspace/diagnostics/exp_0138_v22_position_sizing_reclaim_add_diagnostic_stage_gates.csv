@@ -1,0 +1,7 @@
+dd_improve_ge20,dd_improve_ge25,fee10_positive,nonlinear_evidence,observe,oos_keep_65,oos_keep_75,return_dd_improved,rolling12_improved,shadow_candidate,top20_damage_le20,variant,worst20_improved,year_losses_not_increase
+True,True,True,False,False,False,False,False,True,False,False,V0_constant_50,True,True
+False,False,True,False,False,True,True,False,True,False,True,V1_50_reclaim_add2,True,True
+True,True,True,False,False,False,False,False,True,False,False,V2_50_reclaim_add2_dd_throttle,True,True
+False,False,True,False,False,False,False,False,True,False,False,V3_constant_75,True,True
+False,False,True,False,False,True,True,False,True,False,True,V4_75_reclaim_add1,True,True
+True,False,True,False,False,False,False,False,True,False,False,V5_75_reclaim_add1_dd_throttle,True,True

@@ -42,9 +42,9 @@ checkpoints/*.pt
 .DS_Store
 Thumbs.db
 
-# Agent prompt files (generated per-session by launchers)
+# Agent prompt files
 CLAUDE.md
-AGENTS.md
+# AGENTS.md is project memory and should be versioned.
 
 # Experimental code/artifacts
 dev/

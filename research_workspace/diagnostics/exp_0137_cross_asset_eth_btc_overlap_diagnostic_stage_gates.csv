@@ -1,0 +1,4 @@
+btc_dd_pass_gt_minus75,btc_fee10_oos_positive,btc_oos_positive,btc_sleeve_pass,btc_year_balance_ok,combo,combo_dd_improve_15,combo_fee10_stable,combo_oos_preserved,combo_rolling12_improved,eth_maxdd_btc_not_deep_loss,passes_combo_gate,passes_observe_gate,top20_misaligned
+True,True,True,True,True,combo_80_20_ETH_BTC,False,True,True,False,False,False,False,False
+True,True,True,True,True,combo_70_30_ETH_BTC,False,True,False,False,False,False,False,False
+True,True,True,True,True,combo_60_40_ETH_BTC,False,True,False,False,False,False,False,False

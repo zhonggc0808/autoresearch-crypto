@@ -1,0 +1,4 @@
+combo,dd_improve_vs_v22,full_return,max_dd,oos_not_worse_than_v22_by_20pct,oos_return,passes_combo_gate,rolling12_min,weights
+combo_70_20_10_v22_15m_1h,-0.13770973126630576,101.89638626915522,-0.5815709259439906,True,5.293836856236739,False,-0.4631993400768294,"{""15m_core_donchian"": 0.2, ""1h_core_donchian"": 0.1, ""5m_v22_moirai_baseline"": 0.7}"
+combo_60_20_20_v22_15m_1h,-0.25892401669796855,55.14849776133788,-0.643532867798587,False,4.826866117683375,False,-0.5496628784862609,"{""15m_core_donchian"": 0.2, ""1h_core_donchian"": 0.2, ""5m_v22_moirai_baseline"": 0.6}"
+combo_80_0_20_v22_1h_fast,0.010165382753861555,156.1867235058557,-0.5059805845578258,False,4.734137823861804,False,-0.3555548677125371,"{""1h_core_donchian_fast"": 0.2, ""5m_v22_moirai_baseline"": 0.8}"

@@ -1,0 +1,66 @@
+{
+  "experiment_id": "exp_0137_cross_asset_core_donchian_sanity",
+  "verdict": "OBSERVE_READY_FOR_FULL_EXP0137",
+  "ready_for_full_exp0137": true,
+  "params": {
+    "assets": [
+      "BTCUSDT",
+      "SOLUSDT"
+    ],
+    "entry_lookback": 375,
+    "min_hold_bars": 432,
+    "split_ratio": 0.7,
+    "dd_gate": -0.85,
+    "oos_gate": "> 0"
+  },
+  "rows": [
+    {
+      "symbol": "BTCUSDT",
+      "data_file": "data\\crypto\\BTCUSDT_5m_1300d.parquet",
+      "window_days_from_filename": 1300,
+      "rows": 374314,
+      "start_time": "2022-11-20 03:40:00",
+      "end_time": "2026-06-12 03:35:00",
+      "split_ratio": 0.7,
+      "split_idx": 262019,
+      "split_time": "2025-05-18 05:45:00",
+      "entry_lookback": 375,
+      "min_hold_bars": 432,
+      "full_return": 0.8832099402137132,
+      "oos_return": 0.4018693277151393,
+      "max_dd": -0.6318972571020878,
+      "rolling12_min": -0.4353979812507499,
+      "trade_count": 396,
+      "trades_per_year": 111.26106640242095,
+      "oos_trade_count": 127,
+      "oos_trades_per_year": 118.96792348656207,
+      "dd_gate_pass": true,
+      "oos_positive": true,
+      "passes_sanity": true
+    },
+    {
+      "symbol": "SOLUSDT",
+      "data_file": "data\\crypto\\SOLUSDT_5m_730d.parquet",
+      "window_days_from_filename": 730,
+      "rows": 210240,
+      "start_time": "2024-06-12 00:55:00",
+      "end_time": "2026-06-12 00:50:00",
+      "split_ratio": 0.7,
+      "split_idx": 147168,
+      "split_time": "2025-11-05 00:55:00",
+      "entry_lookback": 375,
+      "min_hold_bars": 432,
+      "full_return": 0.11701463569085369,
+      "oos_return": 0.23407814256512305,
+      "max_dd": -0.6935035004613024,
+      "rolling12_min": -0.5839238363203475,
+      "trade_count": 240,
+      "trades_per_year": 120.082762950737,
+      "oos_trade_count": 68,
+      "oos_trades_per_year": 113.4127570515768,
+      "dd_gate_pass": true,
+      "oos_positive": true,
+      "passes_sanity": true
+    }
+  ]
+}

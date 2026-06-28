@@ -1,0 +1,5 @@
+dd_improve_ge20,dd_ok_observe,fee10_positive,observe,oos_ge400,oos_keep_75,return_dd_beats_baseline,return_dd_beats_v3,rolling12_improved,shadow_candidate,skip_reason,skipped,stage0_atr_pass,top20_damage_le20,top20_damage_le35,variant,vol_targeting_topwinner_risk,worst20_improved
+True,True,True,False,False,False,False,False,True,False,,False,False,False,False,V0_constant_50,normal,True
+False,False,True,False,False,False,False,False,True,False,,False,False,False,False,V3_constant_75,normal,True
+False,False,True,False,True,True,True,True,True,False,,False,False,True,True,V1_vol_target_20d_clip_0p4_1p0,normal,True
+,,,False,,,,,,False,skipped_by_stage0,True,False,,,V2_atr_risk_parity_clip_0p4_1p0,,

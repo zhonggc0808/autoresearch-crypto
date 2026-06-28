@@ -1,0 +1,538 @@
+{
+  "scope": {
+    "experiment_id": "exp_0095",
+    "question": "Can ETH v2.2 + Moirai2 exp_0093 generalize to BTC downloaded windows?",
+    "checkpoint": "checkpoints\\channel_breakout_v2_2_m375_bbm375_1p5.json",
+    "candidate": "configs\\live\\moirai2_gate_exp_0093.json",
+    "model": "research_workspace\\diagnostics\\moirai_2_small",
+    "execution": "next_bar_open",
+    "symbol": "BTCUSDT",
+    "interval": "5m"
+  },
+  "summary": [
+    {
+      "days": 60,
+      "data": "data\\crypto\\BTCUSDT_5m_60d.parquet",
+      "bars": 17280,
+      "start": "2026-04-11 12:50:00",
+      "end": "2026-06-10 12:45:00",
+      "split_idx": 12096,
+      "decisions": 19,
+      "cache_before": 0,
+      "cache_after": 19,
+      "raw_is_return": -0.09083272631323325,
+      "raw_oos_return": -0.011034396489540632,
+      "raw_full_return": -0.0987610051078045,
+      "raw_full_dd": -0.1463529930771874,
+      "raw_trades_full": 19,
+      "raw_rolling_12m_min": null,
+      "raw_fee_10bp_full": -0.11877301984861621,
+      "gate_is_return": -0.09083272631323325,
+      "gate_oos_return": -0.011034396489540632,
+      "gate_full_return": -0.0987610051078045,
+      "gate_full_dd": -0.1463529930771874,
+      "gate_trades_full": 19,
+      "gate_rolling_12m_min": null,
+      "gate_fee_10bp_full": -0.11877301984861621,
+      "gate_delta_oos": 0.0,
+      "gate_delta_full": 0.0,
+      "blocked_full": 0,
+      "blocked_oos": 0,
+      "blocked_original_pnl": 0.0,
+      "blocked_oos_original_pnl": 0.0,
+      "signals_changed": 0
+    },
+    {
+      "days": 365,
+      "data": "data\\crypto\\BTCUSDT_5m_365d.parquet",
+      "bars": 105120,
+      "start": "2025-06-11 09:25:00",
+      "end": "2026-06-11 09:20:00",
+      "split_idx": 73584,
+      "decisions": 68,
+      "cache_before": 0,
+      "cache_after": 68,
+      "raw_is_return": -0.2032674024829142,
+      "raw_oos_return": 0.09001774632373905,
+      "raw_full_return": -0.1307309301155043,
+      "raw_full_dd": -0.2750530248023028,
+      "raw_trades_full": 68,
+      "raw_rolling_12m_min": null,
+      "raw_fee_10bp_full": -0.19821786096790983,
+      "gate_is_return": -0.2032674024829142,
+      "gate_oos_return": 0.10797242035088228,
+      "gate_full_return": -0.11641240838107081,
+      "gate_full_dd": -0.2750530248023028,
+      "gate_trades_full": 67,
+      "gate_rolling_12m_min": null,
+      "gate_fee_10bp_full": -0.18370516751211707,
+      "gate_delta_oos": 0.017954674027143236,
+      "gate_delta_full": 0.014318521734433487,
+      "blocked_full": 1,
+      "blocked_oos": 1,
+      "blocked_original_pnl": -140.5266040059705,
+      "blocked_oos_original_pnl": -140.5266040059705,
+      "signals_changed": 801
+    },
+    {
+      "days": 730,
+      "data": "data\\crypto\\BTCUSDT_5m_730d.parquet",
+      "bars": 210240,
+      "start": "2024-06-12 00:45:00",
+      "end": "2026-06-12 00:40:00",
+      "split_idx": 147168,
+      "decisions": 91,
+      "cache_before": 0,
+      "cache_after": 91,
+      "raw_is_return": -0.24859223137605857,
+      "raw_oos_return": 0.11945704935559531,
+      "raw_full_return": -0.1699960385687289,
+      "raw_full_dd": -0.41398064938613877,
+      "raw_trades_full": 91,
+      "raw_rolling_12m_min": -0.24644185943228636,
+      "raw_fee_10bp_full": -0.25522335433046983,
+      "gate_is_return": -0.08056364429663065,
+      "gate_oos_return": 0.13789664492764553,
+      "gate_full_return": 0.03233710680167534,
+      "gate_full_dd": -0.4139806493861385,
+      "gate_trades_full": 89,
+      "gate_rolling_12m_min": -0.24644185943228636,
+      "gate_fee_10bp_full": -0.07127434199484783,
+      "gate_delta_oos": 0.018439595572050216,
+      "gate_delta_full": 0.20233314537040425,
+      "blocked_full": 2,
+      "blocked_oos": 1,
+      "blocked_original_pnl": -1975.7552776516204,
+      "blocked_oos_original_pnl": -132.3915363575561,
+      "signals_changed": 5985
+    },
+    {
+      "days": 1300,
+      "data": "data\\crypto\\BTCUSDT_5m_1300d.parquet",
+      "bars": 374314,
+      "start": "2022-11-20 03:40:00",
+      "end": "2026-06-12 03:35:00",
+      "split_idx": 262019,
+      "decisions": 111,
+      "cache_before": 0,
+      "cache_after": 111,
+      "raw_is_return": 0.6994408481587162,
+      "raw_oos_return": 0.08457643795920222,
+      "raw_full_return": 0.8481537965277923,
+      "raw_full_dd": -0.5241051616742023,
+      "raw_trades_full": 111,
+      "raw_rolling_12m_min": -0.0460235847277376,
+      "raw_fee_10bp_full": 0.6161299629043548,
+      "gate_is_return": 0.6994408481587162,
+      "gate_oos_return": 0.1024414832456253,
+      "gate_full_return": 0.8785964192104041,
+      "gate_full_dd": -0.5241051616742023,
+      "gate_trades_full": 110,
+      "gate_rolling_12m_min": -0.0460235847277376,
+      "gate_fee_10bp_full": 0.6453827955562106,
+      "gate_delta_oos": 0.017865045286423076,
+      "gate_delta_full": 0.030442622682611775,
+      "blocked_full": 1,
+      "blocked_oos": 1,
+      "blocked_original_pnl": -295.55493887977354,
+      "blocked_oos_original_pnl": -295.55493887977354,
+      "signals_changed": 801
+    }
+  ],
+  "details": [
+    {
+      "days": 60,
+      "raw": {
+        "is": {
+          "return": -0.09083272631323325,
+          "dd": -0.13581589085530377,
+          "sharpe": -1.5809696328803755,
+          "win_rate": 0.3333333333333333,
+          "trades": 15
+        },
+        "oos": {
+          "return": -0.011034396489540632,
+          "dd": -0.07335824841902809,
+          "sharpe": -0.46997048563951327,
+          "win_rate": 0.4,
+          "trades": 5
+        },
+        "full": {
+          "return": -0.0987610051078045,
+          "dd": -0.1463529930771874,
+          "sharpe": -1.237290864003564,
+          "win_rate": 0.3157894736842105,
+          "trades": 19
+        },
+        "rolling_12m_min_return": null,
+        "fee_10bp_return_full": -0.11877301984861621
+      },
+      "gated": {
+        "is": {
+          "return": -0.09083272631323325,
+          "dd": -0.13581589085530377,
+          "sharpe": -1.5809696328803755,
+          "win_rate": 0.3333333333333333,
+          "trades": 15
+        },
+        "oos": {
+          "return": -0.011034396489540632,
+          "dd": -0.07335824841902809,
+          "sharpe": -0.46997048563951327,
+          "win_rate": 0.4,
+          "trades": 5
+        },
+        "full": {
+          "return": -0.0987610051078045,
+          "dd": -0.1463529930771874,
+          "sharpe": -1.237290864003564,
+          "win_rate": 0.3157894736842105,
+          "trades": 19
+        },
+        "rolling_12m_min_return": null,
+        "fee_10bp_return_full": -0.11877301984861621
+      },
+      "gate_diag": {
+        "decision_points": 19,
+        "allowed_long": 9,
+        "allowed_short": 10,
+        "blocked_long": 0,
+        "blocked_short": 0,
+        "blocked_entries": [],
+        "signals_changed": 0
+      },
+      "blocked_attribution": {
+        "summary": {
+          "blocked_entries": 0,
+          "matched_trades": 0,
+          "blocked_oos": 0,
+          "blocked_losers": 0,
+          "blocked_winners": 0,
+          "blocked_original_pnl": 0.0,
+          "blocked_oos_original_pnl": 0.0
+        },
+        "rows": []
+      }
+    },
+    {
+      "days": 365,
+      "raw": {
+        "is": {
+          "return": -0.2032674024829142,
+          "dd": -0.2750530248023028,
+          "sharpe": -0.6129951752566604,
+          "win_rate": 0.21052631578947367,
+          "trades": 38
+        },
+        "oos": {
+          "return": 0.09001774632373905,
+          "dd": -0.20216881056810873,
+          "sharpe": 0.7801920528207715,
+          "win_rate": 0.45161290322580644,
+          "trades": 31
+        },
+        "full": {
+          "return": -0.1307309301155043,
+          "dd": -0.2750530248023028,
+          "sharpe": -0.29398699834101627,
+          "win_rate": 0.3235294117647059,
+          "trades": 68
+        },
+        "rolling_12m_min_return": null,
+        "fee_10bp_return_full": -0.19821786096790983
+      },
+      "gated": {
+        "is": {
+          "return": -0.2032674024829142,
+          "dd": -0.2750530248023028,
+          "sharpe": -0.6129951752566604,
+          "win_rate": 0.21052631578947367,
+          "trades": 38
+        },
+        "oos": {
+          "return": 0.10797242035088228,
+          "dd": -0.2021688105681092,
+          "sharpe": 0.9744317986489496,
+          "win_rate": 0.4666666666666667,
+          "trades": 30
+        },
+        "full": {
+          "return": -0.11641240838107081,
+          "dd": -0.2750530248023028,
+          "sharpe": -0.26322244648225573,
+          "win_rate": 0.3283582089552239,
+          "trades": 67
+        },
+        "rolling_12m_min_return": null,
+        "fee_10bp_return_full": -0.18370516751211707
+      },
+      "gate_diag": {
+        "decision_points": 68,
+        "allowed_long": 32,
+        "allowed_short": 35,
+        "blocked_long": 1,
+        "blocked_short": 0,
+        "blocked_entries": [
+          {
+            "bar": 82100,
+            "time": "82100",
+            "direction": "long",
+            "median_return": -0.028037877457865124,
+            "q10_return": -0.04777146242977526,
+            "q90_return": 0.004588307584269646
+          }
+        ],
+        "signals_changed": 801
+      },
+      "blocked_attribution": {
+        "summary": {
+          "blocked_entries": 1,
+          "matched_trades": 1,
+          "blocked_oos": 1,
+          "blocked_losers": 1,
+          "blocked_winners": 0,
+          "blocked_original_pnl": -140.5266040059705,
+          "blocked_oos_original_pnl": -140.5266040059705
+        },
+        "rows": [
+          {
+            "bar": 82100,
+            "time": "2026-03-23 11:05:00",
+            "direction": "long",
+            "median_return": -0.028037877457865124,
+            "q10_return": -0.04777146242977526,
+            "q90_return": 0.004588307584269646,
+            "in_oos": true,
+            "entry_bar": 82101,
+            "entry_time": "2026-03-23 11:10:00",
+            "exit_bar": 82902,
+            "exit_time": "2026-03-26 05:55:00",
+            "bars_held": 801,
+            "pnl": -140.5266040059705
+          }
+        ]
+      }
+    },
+    {
+      "days": 730,
+      "raw": {
+        "is": {
+          "return": -0.24859223137605857,
+          "dd": -0.41058636490996875,
+          "sharpe": -0.4283879379365008,
+          "win_rate": 0.2926829268292683,
+          "trades": 41
+        },
+        "oos": {
+          "return": 0.11945704935559531,
+          "dd": -0.2067457062443258,
+          "sharpe": 0.4229491614158861,
+          "win_rate": 0.49019607843137253,
+          "trades": 51
+        },
+        "full": {
+          "return": -0.1699960385687289,
+          "dd": -0.41398064938613877,
+          "sharpe": -0.19898969169548272,
+          "win_rate": 0.3956043956043956,
+          "trades": 91
+        },
+        "rolling_12m_min_return": -0.24644185943228636,
+        "fee_10bp_return_full": -0.25522335433046983
+      },
+      "gated": {
+        "is": {
+          "return": -0.08056364429663065,
+          "dd": -0.4105863649099688,
+          "sharpe": -0.1421230414002161,
+          "win_rate": 0.3,
+          "trades": 40
+        },
+        "oos": {
+          "return": 0.13789664492764553,
+          "dd": -0.2067457062443258,
+          "sharpe": 0.4947638146491707,
+          "win_rate": 0.5,
+          "trades": 50
+        },
+        "full": {
+          "return": 0.03233710680167534,
+          "dd": -0.4139806493861385,
+          "sharpe": 0.03717068980762762,
+          "win_rate": 0.4044943820224719,
+          "trades": 89
+        },
+        "rolling_12m_min_return": -0.24644185943228636,
+        "fee_10bp_return_full": -0.07127434199484783
+      },
+      "gate_diag": {
+        "decision_points": 91,
+        "allowed_long": 43,
+        "allowed_short": 46,
+        "blocked_long": 1,
+        "blocked_short": 1,
+        "blocked_entries": [
+          {
+            "bar": 15831,
+            "time": "15831",
+            "direction": "short",
+            "median_return": 0.004906651168760101,
+            "q10_return": -0.04436447864646631,
+            "q90_return": 0.05105307030503892
+          },
+          {
+            "bar": 187036,
+            "time": "187036",
+            "direction": "long",
+            "median_return": -0.028037877457865124,
+            "q10_return": -0.04777146242977526,
+            "q90_return": 0.004588307584269646
+          }
+        ],
+        "signals_changed": 5985
+      },
+      "blocked_attribution": {
+        "summary": {
+          "blocked_entries": 2,
+          "matched_trades": 2,
+          "blocked_oos": 1,
+          "blocked_losers": 2,
+          "blocked_winners": 0,
+          "blocked_original_pnl": -1975.7552776516204,
+          "blocked_oos_original_pnl": -132.3915363575561
+        },
+        "rows": [
+          {
+            "bar": 15831,
+            "time": "2024-08-06 00:00:00",
+            "direction": "short",
+            "median_return": 0.004906651168760101,
+            "q10_return": -0.04436447864646631,
+            "q90_return": 0.05105307030503892,
+            "in_oos": false,
+            "entry_bar": 15832,
+            "entry_time": "2024-08-06 00:05:00",
+            "exit_bar": 21016,
+            "exit_time": "2024-08-24 00:05:00",
+            "bars_held": 5184,
+            "pnl": -1843.3637412940643
+          },
+          {
+            "bar": 187036,
+            "time": "2026-03-23 11:05:00",
+            "direction": "long",
+            "median_return": -0.028037877457865124,
+            "q10_return": -0.04777146242977526,
+            "q90_return": 0.004588307584269646,
+            "in_oos": true,
+            "entry_bar": 187037,
+            "entry_time": "2026-03-23 11:10:00",
+            "exit_bar": 187838,
+            "exit_time": "2026-03-26 05:55:00",
+            "bars_held": 801,
+            "pnl": -132.3915363575561
+          }
+        ]
+      }
+    },
+    {
+      "days": 1300,
+      "raw": {
+        "is": {
+          "return": 0.6994408481587162,
+          "dd": -0.5241051616742023,
+          "sharpe": 0.540561578684177,
+          "win_rate": 0.3018867924528302,
+          "trades": 53
+        },
+        "oos": {
+          "return": 0.08457643795920222,
+          "dd": -0.23101170834626777,
+          "sharpe": 0.17125027814096844,
+          "win_rate": 0.4576271186440678,
+          "trades": 59
+        },
+        "full": {
+          "return": 0.8481537965277923,
+          "dd": -0.5241051616742023,
+          "sharpe": 0.42260887692238136,
+          "win_rate": 0.3783783783783784,
+          "trades": 111
+        },
+        "rolling_12m_min_return": -0.0460235847277376,
+        "fee_10bp_return_full": 0.6161299629043548
+      },
+      "gated": {
+        "is": {
+          "return": 0.6994408481587162,
+          "dd": -0.5241051616742023,
+          "sharpe": 0.540561578684177,
+          "win_rate": 0.3018867924528302,
+          "trades": 53
+        },
+        "oos": {
+          "return": 0.1024414832456253,
+          "dd": -0.23101170834626777,
+          "sharpe": 0.2083002767085084,
+          "win_rate": 0.46551724137931033,
+          "trades": 58
+        },
+        "full": {
+          "return": 0.8785964192104041,
+          "dd": -0.5241051616742023,
+          "sharpe": 0.4355391443141679,
+          "win_rate": 0.38181818181818183,
+          "trades": 110
+        },
+        "rolling_12m_min_return": -0.0460235847277376,
+        "fee_10bp_return_full": 0.6453827955562106
+      },
+      "gate_diag": {
+        "decision_points": 111,
+        "allowed_long": 55,
+        "allowed_short": 55,
+        "blocked_long": 1,
+        "blocked_short": 0,
+        "blocked_entries": [
+          {
+            "bar": 351075,
+            "time": "351075",
+            "direction": "long",
+            "median_return": -0.028037877457865124,
+            "q10_return": -0.04777146242977526,
+            "q90_return": 0.004588307584269646
+          }
+        ],
+        "signals_changed": 801
+      },
+      "blocked_attribution": {
+        "summary": {
+          "blocked_entries": 1,
+          "matched_trades": 1,
+          "blocked_oos": 1,
+          "blocked_losers": 1,
+          "blocked_winners": 0,
+          "blocked_original_pnl": -295.55493887977354,
+          "blocked_oos_original_pnl": -295.55493887977354
+        },
+        "rows": [
+          {
+            "bar": 351075,
+            "time": "2026-03-23 11:05:00",
+            "direction": "long",
+            "median_return": -0.028037877457865124,
+            "q10_return": -0.04777146242977526,
+            "q90_return": 0.004588307584269646,
+            "in_oos": true,
+            "entry_bar": 351076,
+            "entry_time": "2026-03-23 11:10:00",
+            "exit_bar": 351877,
+            "exit_time": "2026-03-26 05:55:00",
+            "bars_held": 801,
+            "pnl": -295.55493887977354
+          }
+        ]
+      }
+    }
+  ]
+}
