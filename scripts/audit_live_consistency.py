@@ -371,6 +371,8 @@ def _normalize_live_events(
     bar_times = pd.to_datetime(df["datetime"]).to_numpy()
     rows = []
     for event in events:
+        if not _is_filled_live_event(event):
+            continue
         kind_side = _event_kind(str(event.get("type", "")))
         if kind_side is None:
             continue
@@ -412,6 +414,28 @@ def _event_kind(event_type: str) -> tuple[str, str] | None:
     if up.startswith("FORCE_CLOSE"):
         return "close", "unknown"
     return None
+
+
+def _is_filled_live_event(event: dict[str, Any]) -> bool:
+    """Return whether a state trade event should be treated as an executed fill."""
+    filled = event.get("filled")
+    if filled is True:
+        return True
+    if filled is False:
+        return False
+
+    status = str(event.get("order_status") or event.get("status") or "").lower()
+    if status:
+        return status in {"filled", "closed"}
+
+    if _filled_hint(event):
+        return True
+
+    event_type = str(event.get("type", "")).upper()
+    # Legacy state files did not record order_status. Taker/IOC orders were
+    # treated as immediate fills, while maker orders without fee/pnl hints
+    # may only be submitted or canceled orders and should not close trades.
+    return "TAKER" in event_type or "IOC" in event_type
 
 
 def _match_events(

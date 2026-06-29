@@ -334,6 +334,47 @@ def test_live_bitget_insufficient_margin_halts_and_notifies(monkeypatch) -> None
     assert notices[0][0] == "Bitget保证金不足，程序已停止"
 
 
+def test_live_bitget_maker_close_records_submitted_status(monkeypatch) -> None:
+    module = importlib.import_module("live_bitget_quant")
+    monkeypatch.setattr(module, "log_message", lambda _msg: None)
+    monkeypatch.setattr(module, "cancel_all_orders", lambda _exchange, _symbol: True)
+    monkeypatch.setattr(module, "get_position", lambda _exchange, _symbol: -0.02)
+    monkeypatch.setattr(
+        module,
+        "plan_close_order",
+        lambda **_kwargs: CloseOrderPlan(
+            action="maker",
+            side="buy",
+            position_side="short",
+            size=0.02,
+            price=1999.9,
+            pnl_pct=0.05,
+            trade_type="CLOSE_SHORT_Maker(TP)",
+        ),
+    )
+    monkeypatch.setattr(module, "place_limit_order", lambda *_args, **_kwargs: "bitget-close-1")
+
+    state = {"position": -1, "strategy_size": 0.02, "entry_price": 2100.0, "trades": []}
+    new_state = module.execute_trade(
+        signal_id=2,
+        exchange=object(),
+        symbol="BTC/USDT:USDT",
+        tick_sz=0.1,
+        lot_sz=0.001,
+        capital_per_trade=50.0,
+        state=state,
+        current_price=2000.0,
+        best_bid=1999.9,
+        best_ask=2000.0,
+    )
+
+    assert new_state["pending_close"] is True
+    assert new_state["pending_close_order_id"] == "bitget-close-1"
+    assert new_state["trades"][0]["type"] == "CLOSE_SHORT_Maker(TP)"
+    assert new_state["trades"][0]["order_status"] == "submitted"
+    assert new_state["trades"][0]["filled"] is False
+
+
 def test_live_bitget_open_fill_notify_helper(monkeypatch) -> None:
     module = importlib.import_module("live_bitget_quant")
     notices = []

@@ -64,6 +64,12 @@ from dex.live.common import (
     round_to_tick,
     send_trade_notification,
 )
+from dex.live.position_sizing import (
+    EXP0140_VOL_REF,
+    VOL_TARGET_20D_WINDOW_BARS,
+    compute_vol_target_sizing,
+    estimate_entry_fillability,
+)
 from dex.live.profiles import (
     profile_checkpoint_map,
     risk_config_for_profile,
@@ -93,6 +99,7 @@ LOG_FILE = os.path.join(LOG_DIR, "live_bitget_log.txt")
 LOCK_FILE = os.path.join(LOG_DIR, "live_bitget_quant.lock")
 CACHE_DIR = "data/live_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
+MIN_ORDER_USDT = 5.0
 
 INTERVAL_SECONDS_MAP = {
     "1m": 60,
@@ -421,6 +428,33 @@ def resolve_entry_margin_and_notional(
     base_margin = min(configured_margin, available_margin * reserve_ratio)
     margin = base_margin * entry_size_multiplier
     return margin, margin * leverage
+
+
+def pending_open_capital_per_trade(state: dict, fallback_capital_per_trade: float) -> float:
+    """Use the original pending entry notional for maker-to-IOC fallback."""
+    value = state.get("pending_open_capital_per_trade")
+    try:
+        value_f = float(value)
+    except (TypeError, ValueError):
+        value_f = 0.0
+    return value_f if value_f > 0 else fallback_capital_per_trade
+
+
+def clear_pending_open_sizing(state: dict) -> None:
+    state["pending_open_capital_per_trade"] = 0.0
+    state["pending_open_entry_size_multiplier"] = 1.0
+    state["pending_open_vol_target_multiplier"] = 1.0
+    state["pending_open_vol_target_realized_vol_20d"] = None
+    state["pending_open_vol_target_reason"] = ""
+
+
+def restore_pending_open_sizing(state: dict) -> None:
+    state["entry_size_multiplier"] = state.get("pending_open_entry_size_multiplier", 1.0)
+    state["vol_target_multiplier"] = state.get("pending_open_vol_target_multiplier", 1.0)
+    state["vol_target_realized_vol_20d"] = state.get(
+        "pending_open_vol_target_realized_vol_20d"
+    )
+    state["vol_target_reason"] = state.get("pending_open_vol_target_reason", "")
 
 
 @retry_on_exception(max_retries=3, delay=1.0)
@@ -849,6 +883,37 @@ def record_fee_fields(trades, order_id, fee_fields):
     return attached
 
 
+def mark_trade_order_status(
+    trades,
+    order_id,
+    status,
+    *,
+    filled=None,
+    size=None,
+    price=None,
+    extra=None,
+):
+    """Update the latest state trade event for an order without changing execution behavior."""
+    if not order_id:
+        return False
+    target = str(order_id)
+    for trade in reversed(trades):
+        if str(trade.get("orderId")) != target:
+            continue
+        trade["order_status"] = status
+        if filled is not None:
+            trade["filled"] = bool(filled)
+        if size is not None and size > 0:
+            trade["size"] = size
+        if price is not None and price > 0:
+            trade["price"] = price
+        if extra:
+            trade.update(extra)
+        trade["status_update_time"] = datetime.now().isoformat()
+        return True
+    return False
+
+
 def record_state_fee_fields(state, order_id, fee_fields):
     if not fee_fields:
         return False
@@ -999,7 +1064,6 @@ def execute_trade(
     position = state.get("position", 0)
     strategy_size = state.get("strategy_size", 0.0)
     trades = state.get("trades", [])
-    MIN_ORDER_USDT = 5.0
 
     log_message(f"[交易] signal={signal_id} position={position} target计算中...")
 
@@ -1128,9 +1192,12 @@ def execute_trade(
                     "orderId": order_id,
                     "size": close_plan.size,
                     "price": order_price,
+                    "order_status": "submitted",
+                    "filled": False,
                 }
             )
             if close_plan.action == "taker":
+                mark_trade_order_status(trades, order_id, "filled", filled=True)
                 record_fee_fields(
                     trades, order_id, fetch_order_fee_fields(exchange, symbol, order_id)
                 )
@@ -1163,11 +1230,13 @@ def execute_trade(
                 actual_after = get_position(exchange, symbol)
                 flip_close_filled_tag = " [FLIP_CLOSE_FILLED]" if is_flip else ""
                 if abs(actual_after) < lot_sz * 0.5:
+                    mark_trade_order_status(trades, order_id, "filled", filled=True)
                     state["position"] = 0
                     state["strategy_size"] = 0.0
                     state["entry_bar"] = 0
                     log_message(f"[平仓确认] 市价单已成交, 持仓归零{flip_close_filled_tag}")
                 else:
+                    mark_trade_order_status(trades, order_id, "partially_filled", filled=False)
                     state["position"] = 1 if actual_after > 0 else -1
                     state["strategy_size"] = abs(actual_after)
                     state["pending_close"] = True
@@ -1217,18 +1286,21 @@ def execute_trade(
 
         # 下单前打印 size 计算明细
         raw_size = capital_per_trade / current_price if current_price > 0 else 0
+        min_lot_notional = lot_sz * current_price if current_price > 0 else 0.0
         log_message(
             f"[{open_label}计算] raw_size={raw_size:.6f} "
             f"lot_sz={lot_sz} min_notional={MIN_ORDER_USDT} "
             f"capital={capital_per_trade:.2f} price={current_price:.2f} "
-            f"notional_est={raw_size * current_price:.2f}"
+            f"notional_est={raw_size * current_price:.2f} "
+            f"min_lot_notional={min_lot_notional:.2f}"
         )
         if plan.action == "skip":
             if plan.reason == "zero_size":
                 log_message(
                     f"[跳过{open_label}] 计算大小为0: "
                     f"raw_size={raw_size:.6f} lot_sz={lot_sz} "
-                    f"capital={capital_per_trade:.2f} price={current_price:.2f}"
+                    f"capital={capital_per_trade:.2f} price={current_price:.2f} "
+                    f"至少需要名义价值≈{min_lot_notional:.2f} USDT 才能达到最小交易步长"
                 )
             elif plan.reason == "invalid_price":
                 log_message(f"[跳过{open_label}] 价格无效")
@@ -1262,6 +1334,14 @@ def execute_trade(
                         "orderId": order_id,
                         "size": plan.size,
                         "price": current_price,
+                        "order_status": "filled",
+                        "filled": True,
+                        "entry_size_multiplier": state.get("entry_size_multiplier", 1.0),
+                        "vol_target_multiplier": state.get("vol_target_multiplier", 1.0),
+                        "vol_target_realized_vol_20d": state.get(
+                            "vol_target_realized_vol_20d"
+                        ),
+                        "vol_target_reason": state.get("vol_target_reason"),
                     }
                 )
                 record_fee_fields(
@@ -1305,6 +1385,14 @@ def execute_trade(
                         "orderId": order_id,
                         "size": plan.size,
                         "price": plan.price,
+                        "order_status": "submitted",
+                        "filled": False,
+                        "entry_size_multiplier": state.get("entry_size_multiplier", 1.0),
+                        "vol_target_multiplier": state.get("vol_target_multiplier", 1.0),
+                        "vol_target_realized_vol_20d": state.get(
+                            "vol_target_realized_vol_20d"
+                        ),
+                        "vol_target_reason": state.get("vol_target_reason"),
                     }
                 )
                 state["pending_open"] = True
@@ -1313,6 +1401,17 @@ def execute_trade(
                 state["pending_open_price"] = plan.price
                 state["pending_open_size"] = plan.size
                 state["pending_open_is_flip"] = is_flip
+                state["pending_open_capital_per_trade"] = capital_per_trade
+                state["pending_open_entry_size_multiplier"] = state.get(
+                    "entry_size_multiplier", 1.0
+                )
+                state["pending_open_vol_target_multiplier"] = state.get(
+                    "vol_target_multiplier", 1.0
+                )
+                state["pending_open_vol_target_realized_vol_20d"] = state.get(
+                    "vol_target_realized_vol_20d"
+                )
+                state["pending_open_vol_target_reason"] = state.get("vol_target_reason", "")
                 flip_tag = " [FLIP_OPEN_SUBMITTED]" if is_flip else ""
                 log_message(
                     f"[{open_label}Maker] 挂单{plan.side} size={plan.size:.8f} price={plan.price:.2f} notional={plan.notional:.2f}{flip_tag}"
@@ -1743,6 +1842,16 @@ def print_status(exchange, symbol, state, leverage=1.0):
         pending_dir = "做多" if state.get("pending_open_signal") == 2 else "做空"
         log_message(f"挂单方向: {pending_dir}")
         log_message(f"挂单价格: {state.get('pending_open_price', 0):.2f}")
+    if state.get("vol_target_sizing_enabled"):
+        rv = state.get("vol_target_realized_vol_20d")
+        rv_text = "NA" if rv is None else f"{float(rv):.6f}"
+        log_message(
+            "VolTarget: "
+            f"mult={state.get('vol_target_multiplier', 1.0):.4f} "
+            f"combined={state.get('entry_size_multiplier', 1.0):.4f} "
+            f"rv20d={rv_text} reason={state.get('vol_target_reason', '')} "
+            f"fillable={state.get('vol_target_fillable')}"
+        )
     log_message(f"合约持仓: {position:.6f} | 杠杆: {leverage}x")
     if abs(position) > 0 and entry_price > 0:
         log_message(f"入场价格: {entry_price:.2f}")
@@ -1879,6 +1988,7 @@ def reconcile_state_on_startup(exchange, symbol, state, args, lot_sz, is_signal_
         state_d["pending_open_price"] = 0.0
         state_d["pending_open_size"] = 0.0
         state_d["pending_open_is_flip"] = False
+        clear_pending_open_sizing(state_d)
         state_d["pending_close"] = False
         state_d["pending_close_order_id"] = None
         state_d["pending_close_reason"] = ""
@@ -1917,6 +2027,7 @@ def reconcile_state_on_startup(exchange, symbol, state, args, lot_sz, is_signal_
     state["pending_open_signal"] = 0
     state["pending_open_price"] = 0.0
     state["pending_open_size"] = 0.0
+    clear_pending_open_sizing(state)
     state["pending_close"] = False
     state["pending_close_order_id"] = None
     state["pending_close_reason"] = ""
@@ -2036,10 +2147,18 @@ def main():
         default="data/live_cache/bitget_timesfm_gate_cache.json",
         help="TimesFM live forecast cache",
     )
+    parser.add_argument(
+        "--vol-target-sizing",
+        action="store_true",
+        help="启用 exp0140 20d realized-vol 入场仓位控制（实盘执行，不是 shadow）",
+    )
     args = parser.parse_args()
 
     if not args.demo and not args.live:
         log_message("错误: 必须指定 --demo (Sandbox 模拟盘) 或 --live (实盘)")
+        sys.exit(1)
+    if args.vol_target_sizing and args.interval != "5m":
+        log_message("错误: --vol-target-sizing 仅支持 exp0140 的 5m K 线口径")
         sys.exit(1)
 
     if args.live:
@@ -2062,6 +2181,14 @@ def main():
     log_message(f"策略档案: {args.strategy_profile}{profile_note}")
     log_message(f"Checkpoint: {args.checkpoint}")
     log_message(f"Risk profile: {risk_config.get('risk_profile', 'none')}")
+    if args.vol_target_sizing:
+        log_message(
+            "Vol target sizing ENABLED: exp0140 V1 "
+            f"window={VOL_TARGET_20D_WINDOW_BARS} bars vol_ref={EXP0140_VOL_REF:.6f} "
+            "clip=[0.40, 1.00]"
+        )
+    else:
+        log_message("Vol target sizing: disabled")
     log_message("混合费率: 开仓=Maker, 止盈=Maker, 止损=Taker, 超时=Maker")
     log_message(f"杠杆: {args.leverage}x")
     log_message(f"交易对: {args.symbol} -> {symbol}")
@@ -2116,7 +2243,8 @@ def main():
                 checkpoint_variant=str(checkpoint.get("variant", "")),
             )
             log_message(
-                f"TimesFM gate ENABLED: candidate={timesfm_gate.candidate_id} "
+                f"Forecast gate ENABLED: family={timesfm_gate.model_family} "
+                f"candidate={timesfm_gate.candidate_id} "
                 f"context={timesfm_gate.context} horizon={timesfm_gate.horizon}"
             )
     else:
@@ -2198,6 +2326,23 @@ def main():
             "entry_bar": 0,
             "last_processed_bar": "",
             "pending_open": False,
+            "pending_order_id": None,
+            "pending_open_signal": 0,
+            "pending_open_price": 0.0,
+            "pending_open_size": 0.0,
+            "pending_open_is_flip": False,
+            "pending_open_capital_per_trade": 0.0,
+            "pending_open_entry_size_multiplier": 1.0,
+            "pending_open_vol_target_multiplier": 1.0,
+            "pending_open_vol_target_realized_vol_20d": None,
+            "pending_open_vol_target_reason": "",
+            "vol_target_sizing_enabled": bool(args.vol_target_sizing),
+            "vol_target_multiplier": 1.0,
+            "vol_target_realized_vol_20d": None,
+            "vol_target_raw_multiplier": None,
+            "vol_target_reason": "disabled",
+            "vol_target_fallback": False,
+            "vol_target_fillable": None,
             "scheduled_entry_direction": 0,
             "scheduled_entry_due_bar": "",
             "scheduled_entry_reason": "",
@@ -2237,6 +2382,18 @@ def main():
             "pending_open_price": 0.0,
             "pending_open_size": 0.0,
             "pending_open_is_flip": False,
+            "pending_open_capital_per_trade": 0.0,
+            "pending_open_entry_size_multiplier": 1.0,
+            "pending_open_vol_target_multiplier": 1.0,
+            "pending_open_vol_target_realized_vol_20d": None,
+            "pending_open_vol_target_reason": "",
+            "vol_target_sizing_enabled": bool(args.vol_target_sizing),
+            "vol_target_multiplier": 1.0,
+            "vol_target_realized_vol_20d": None,
+            "vol_target_raw_multiplier": None,
+            "vol_target_reason": "disabled",
+            "vol_target_fallback": False,
+            "vol_target_fillable": None,
             "scheduled_entry_direction": 0,
             "scheduled_entry_due_bar": "",
             "scheduled_entry_reason": "",
@@ -2283,6 +2440,18 @@ def main():
         state.setdefault("pending_open_price", 0.0)
         state.setdefault("pending_open_size", 0.0)
         state.setdefault("pending_open_is_flip", False)
+        state.setdefault("pending_open_capital_per_trade", 0.0)
+        state.setdefault("pending_open_entry_size_multiplier", 1.0)
+        state.setdefault("pending_open_vol_target_multiplier", 1.0)
+        state.setdefault("pending_open_vol_target_realized_vol_20d", None)
+        state.setdefault("pending_open_vol_target_reason", "")
+        state["vol_target_sizing_enabled"] = bool(args.vol_target_sizing)
+        state.setdefault("vol_target_multiplier", 1.0)
+        state.setdefault("vol_target_realized_vol_20d", None)
+        state.setdefault("vol_target_raw_multiplier", None)
+        state.setdefault("vol_target_reason", "disabled")
+        state.setdefault("vol_target_fallback", False)
+        state.setdefault("vol_target_fillable", None)
         state.setdefault("scheduled_entry_direction", 0)
         state.setdefault("scheduled_entry_due_bar", "")
         state.setdefault("scheduled_entry_reason", "")
@@ -2352,6 +2521,19 @@ def main():
             "pending_open_signal": 0,
             "pending_open_price": 0.0,
             "pending_open_size": 0.0,
+            "pending_open_is_flip": False,
+            "pending_open_capital_per_trade": 0.0,
+            "pending_open_entry_size_multiplier": 1.0,
+            "pending_open_vol_target_multiplier": 1.0,
+            "pending_open_vol_target_realized_vol_20d": None,
+            "pending_open_vol_target_reason": "",
+            "vol_target_sizing_enabled": bool(args.vol_target_sizing),
+            "vol_target_multiplier": 1.0,
+            "vol_target_realized_vol_20d": None,
+            "vol_target_raw_multiplier": None,
+            "vol_target_reason": "disabled",
+            "vol_target_fallback": False,
+            "vol_target_fillable": None,
             "scheduled_entry_direction": 0,
             "scheduled_entry_due_bar": "",
             "scheduled_entry_reason": "",
@@ -2427,6 +2609,7 @@ def main():
                     state["tp_price"] = 0.0
                     state["tp_side"] = None
                     state["pending_open"] = False
+                    clear_pending_open_sizing(state)
                 elif not args.signal_only and abs(actual_pos) >= lot_sz * 0.5 and state.get("pending_open"):
                     # pending_open 挂单成交了（但还没被主循环检测到）
                     pending_order_id = state.get("pending_order_id")
@@ -2434,6 +2617,14 @@ def main():
                         state,
                         pending_order_id,
                         fetch_order_fee_fields(exchange, symbol, pending_order_id),
+                    )
+                    mark_trade_order_status(
+                        state.get("trades", []),
+                        pending_order_id,
+                        "filled",
+                        filled=True,
+                        size=abs(actual_pos),
+                        price=state.get("pending_open_price", 0),
                     )
                     pos_dir = 1 if actual_pos > 0 else -1
                     was_flip = bool(state.get("pending_open_is_flip"))
@@ -2453,6 +2644,7 @@ def main():
                         state["entry_bar"] = state.get("bar_count", 0) - 1
                     state["pending_open"] = False
                     state["pending_order_id"] = None
+                    clear_pending_open_sizing(state)
                     _notify_open_filled(
                         state,
                         symbol,
@@ -2474,6 +2666,12 @@ def main():
                             state,
                             pc_order_id,
                             fetch_order_fee_fields(exchange, symbol, pc_order_id),
+                        )
+                        mark_trade_order_status(
+                            state.get("trades", []),
+                            pc_order_id,
+                            "filled",
+                            filled=True,
                         )
                         flip_tag = " [FLIP_CLOSE_FILLED]" if pc_target in (1, -1) else ""
                         log_message(
@@ -2518,6 +2716,12 @@ def main():
 
                         if order_state == "filled":
                             record_state_fee_fields(state, pc_order_id, fee_fields)
+                            mark_trade_order_status(
+                                state.get("trades", []),
+                                pc_order_id,
+                                "filled",
+                                filled=True,
+                            )
                             log_message(
                                 f"[PENDING_CLOSE_FILLED] 平仓单已成交, 持仓更新 "
                                 f"actual_pos={actual_pos:.6f}"
@@ -2555,6 +2759,12 @@ def main():
 
                         else:
                             # canceled / expired / rejected
+                            mark_trade_order_status(
+                                state.get("trades", []),
+                                pc_order_id,
+                                "canceled",
+                                filled=False,
+                            )
                             log_message(
                                 f"[PENDING_CLOSE_CANCELED] 平仓单取消/过期: "
                                 f"order_state={order_state}"
@@ -2609,6 +2819,14 @@ def main():
                         state["entry_price"] = (
                             avg_px if avg_px > 0 else state.get("pending_open_price", 0)
                         )
+                        mark_trade_order_status(
+                            state.get("trades", []),
+                            pc_id,
+                            "filled",
+                            filled=True,
+                            size=state["strategy_size"],
+                            price=state["entry_price"],
+                        )
                         state["entry_bar"] = state.get("bar_count", 0) - 1
                         state["pending_open"] = False
                         state["pending_order_id"] = None
@@ -2616,6 +2834,7 @@ def main():
                         was_flip = state.get("pending_open_is_flip", False)
                         flip_tag = " [FLIP_OPEN_FILLED]" if was_flip else ""
                         state["pending_open_is_flip"] = False
+                        clear_pending_open_sizing(state)
                         log_message(
                             f"[PENDING_OPEN_FILLED] 入场成功 {pos_dir:+d} "
                             f"@{state['entry_price']:.2f} size={state['strategy_size']:.6f}{flip_tag}"
@@ -2641,10 +2860,17 @@ def main():
                         continue
                     else:
                         # canceled / expired / rejected
+                        mark_trade_order_status(
+                            state.get("trades", []),
+                            pc_id,
+                            "canceled",
+                            filled=False,
+                        )
                         log_message(f"[PENDING_OPEN_CANCELED] 挂单取消/过期: state={o_state}")
                         state["pending_open"] = False
                         state["pending_order_id"] = None
                         state["pending_open_signal"] = 0
+                        clear_pending_open_sizing(state)
 
                 # 1. 获取 K 线数据
                 if is_v21:
@@ -2805,6 +3031,11 @@ def main():
                                 df,
                                 current_position=int(state.get("position", 0)),
                             )
+                            gate_family = str(
+                                timesfm_info.get(
+                                    "model_family", getattr(timesfm_gate, "model_family", "")
+                                )
+                            )
                             state["timesfm_gate_active"] = True
                             state["timesfm_gate_checked"] = bool(timesfm_info.get("checked"))
                             state["timesfm_gate_allowed"] = bool(timesfm_info.get("allowed"))
@@ -2813,9 +3044,21 @@ def main():
                                 "input_signal"
                             )
                             state["timesfm_gate_signal_after"] = signal_id
+                            state["forecast_gate_active"] = True
+                            state["forecast_gate_model_family"] = gate_family
+                            state["forecast_gate_strategy_type"] = timesfm_info.get(
+                                "strategy_type", ""
+                            )
+                            state["forecast_gate_checked"] = bool(timesfm_info.get("checked"))
+                            state["forecast_gate_allowed"] = bool(timesfm_info.get("allowed"))
+                            state["forecast_gate_reason"] = timesfm_info.get("reason", "")
+                            state["forecast_gate_signal_before"] = timesfm_info.get(
+                                "input_signal"
+                            )
+                            state["forecast_gate_signal_after"] = signal_id
                             if timesfm_info.get("checked"):
                                 log_message(
-                                    "[TimesFM gate] "
+                                    f"[Forecast gate:{gate_family or 'unknown'}] "
                                     f"{timesfm_info.get('reason')} "
                                     f"{timesfm_info.get('input_signal')}->{signal_id} "
                                     f"median={timesfm_info.get('median_return', 0):+.4%} "
@@ -2940,6 +3183,7 @@ def main():
                                 cancel_all_orders(exchange, symbol)
                                 state["pending_open"] = False
                                 state["pending_order_id"] = None
+                                clear_pending_open_sizing(state)
                                 log_message("[LIVE_RISK] DD block canceled pending open")
                             if signal_id in (2, 3):
                                 log_message(
@@ -2955,6 +3199,7 @@ def main():
                             and (risk_decision.action == "close" or not signal_wants_close)
                         ):
                             state["pending_open"] = False
+                            clear_pending_open_sizing(state)
                             reason = f"live_risk:{risk_decision.reason}"
                             log_message(
                                 f"[LIVE_RISK] {risk_decision.action} "
@@ -2986,12 +3231,65 @@ def main():
                             )
                             risk_action_handled = True
 
+                    state["risk_entry_size_multiplier"] = entry_size_multiplier
+                    if args.vol_target_sizing:
+                        vol_decision = compute_vol_target_sizing(df)
+                        state.update(vol_decision.state_updates())
+                        state["vol_target_sizing_enabled"] = True
+                        entry_size_multiplier = min(
+                            1.0,
+                            max(0.0, entry_size_multiplier * vol_decision.multiplier),
+                        )
+                    else:
+                        state["vol_target_sizing_enabled"] = False
+                        state["vol_target_multiplier"] = 1.0
+                        state["vol_target_realized_vol_20d"] = None
+                        state["vol_target_raw_multiplier"] = None
+                        state["vol_target_reason"] = "disabled"
+                        state["vol_target_fallback"] = False
+                    state["entry_size_multiplier"] = entry_size_multiplier
+
                     effective_margin, risk_capital_per_trade = resolve_entry_margin_and_notional(
                         args.capital,
                         available_usdt,
                         args.leverage,
                         entry_size_multiplier,
                     )
+                    if args.vol_target_sizing:
+                        fillability = estimate_entry_fillability(
+                            notional=risk_capital_per_trade,
+                            current_price=current_price,
+                            lot_size=lot_sz,
+                            min_order_notional=MIN_ORDER_USDT,
+                        )
+                        state["vol_target_raw_size"] = fillability.raw_size
+                        state["vol_target_rounded_size"] = fillability.rounded_size
+                        state["vol_target_notional"] = fillability.notional
+                        state["vol_target_min_lot_notional"] = fillability.min_lot_notional
+                        state["vol_target_min_order_notional"] = fillability.min_order_notional
+                        state["vol_target_fillable"] = fillability.fillable
+                        if signal_id in (2, 3) and state.get("position", 0) == 0:
+                            rv = state.get("vol_target_realized_vol_20d")
+                            raw_mult = state.get("vol_target_raw_multiplier")
+                            rv_text = "NA" if rv is None else f"{float(rv):.6f}"
+                            raw_mult_text = (
+                                "NA" if raw_mult is None else f"{float(raw_mult):.4f}"
+                            )
+                            log_message(
+                                "[VOL_TARGET] "
+                                f"rv20d={rv_text} raw_mult={raw_mult_text} "
+                                f"vol_mult={state['vol_target_multiplier']:.4f} "
+                                f"risk_mult={state['risk_entry_size_multiplier']:.4f} "
+                                f"combined={entry_size_multiplier:.4f} "
+                                f"reason={state['vol_target_reason']} "
+                                f"bars={state['vol_target_bars_available']}/"
+                                f"{state['vol_target_required_bars']} "
+                                f"notional={risk_capital_per_trade:.2f} "
+                                f"raw_size={fillability.raw_size:.6f} "
+                                f"rounded_size={fillability.rounded_size:.6f} "
+                                f"fillable={fillability.fillable} "
+                                f"min_lot_notional={fillability.min_lot_notional:.2f}"
+                            )
                     if effective_margin + 1e-9 < args.capital * entry_size_multiplier:
                         log_message(
                             "[资金自适应] "
@@ -3013,6 +3311,7 @@ def main():
                                 f"[FORCE_FLAT_CLOSE] {exit_reason} -> taker reduce-only (风控退出)"
                             )
                             state["pending_open"] = False
+                            clear_pending_open_sizing(state)
                             state = force_close(
                                 exchange,
                                 symbol,
@@ -3027,6 +3326,7 @@ def main():
                             )
                         else:
                             state["pending_open"] = False
+                            clear_pending_open_sizing(state)
                             state = force_close(
                                 exchange,
                                 symbol,
@@ -3090,6 +3390,7 @@ def main():
                                 )
                                 if state.get("pending_open_is_flip"):
                                     state["pending_open_is_flip"] = False
+                                clear_pending_open_sizing(state)
                                 # 挂 TP 单
                                 state = manage_tp_order(
                                     exchange,
@@ -3102,11 +3403,16 @@ def main():
                             elif order_state in ("live", "partially_filled"):
                                 # Maker 没成交完 -> IOC 兜底
                                 pending_signal = state.get("pending_open_signal", 0)
+                                pending_capital = pending_open_capital_per_trade(
+                                    state, risk_capital_per_trade
+                                )
                                 cancel_all_orders(exchange, symbol)
                                 state["pending_open"] = False
                                 state["pending_order_id"] = None
 
                                 if signal_id == pending_signal:
+                                    restore_pending_open_sizing(state)
+                                    clear_pending_open_sizing(state)
                                     log_message(
                                         f"[市价兜底] Maker未成交，切换市价单 signal={signal_id}"
                                     )
@@ -3116,7 +3422,7 @@ def main():
                                         symbol,
                                         tick_sz,
                                         lot_sz,
-                                        risk_capital_per_trade,
+                                        pending_capital,
                                         state,
                                         current_price,
                                         best_bid,
@@ -3133,6 +3439,7 @@ def main():
                                             state,
                                         )
                                 else:
+                                    clear_pending_open_sizing(state)
                                     log_message(
                                         f"[信号变化] 挂单期间信号改变 ({pending_signal}->{signal_id})，取消挂单"
                                     )
@@ -3150,17 +3457,31 @@ def main():
                                     )
                             elif order_state == "canceled":
                                 # 订单已被取消
+                                pending_signal = state.get("pending_open_signal", 0)
+                                pending_capital = pending_open_capital_per_trade(
+                                    state, risk_capital_per_trade
+                                )
                                 state["pending_open"] = False
                                 state["pending_order_id"] = None
                                 log_message("[挂单已取消] 外部取消或已处理")
                                 # 重新执行当前信号
+                                capital_for_retry = (
+                                    pending_capital
+                                    if signal_id == pending_signal
+                                    else risk_capital_per_trade
+                                )
+                                if signal_id == pending_signal:
+                                    restore_pending_open_sizing(state)
+                                    clear_pending_open_sizing(state)
+                                else:
+                                    clear_pending_open_sizing(state)
                                 state = execute_trade(
                                     signal_id,
                                     exchange,
                                     symbol,
                                     tick_sz,
                                     lot_sz,
-                                    risk_capital_per_trade,
+                                    capital_for_retry,
                                     state,
                                     current_price,
                                     best_bid,

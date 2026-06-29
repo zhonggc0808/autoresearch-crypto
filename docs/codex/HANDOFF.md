@@ -23,6 +23,26 @@ Added `save-code` as a repo-level skill for the requested "save code" workflow:
 
 This workflow does not change the current ETH strategy baseline or live/demo routing.
 
+## Latest Live Vol-Target Sizing
+
+On 2026-06-28, after explicit user approval, Bitget live received an opt-in implementation of `exp_0140` V1 20d realized-vol entry sizing.
+
+- New helper: `dex/live/position_sizing.py`
+- Live entrypoint: `live_bitget_quant.py --vol-target-sizing`
+- Tests: `tests/test_live_vol_target_position_sizing.py`
+- Formula: `close.pct_change().rolling(5760).std().shift(1) * sqrt(365.25*288)`, `vol_ref=0.794812`, multiplier `clip(vol_ref / realized_vol_20d, 0.4, 1.0)`.
+- Scope: new-entry notional only. It does not change ChannelBreakout signals, Moirai/TimesFM gates, exits, stop logic, checkpoint/config files, leverage, API routing, or order-price semantics.
+- Execution semantics: completed 5m bars only; entry multiplier is fixed when the entry decision is made; no intratrade dynamic rebalance.
+- Fallback: if history is missing/invalid, multiplier is `1.0` and the reason is logged.
+- Pending maker opens store original `capital_per_trade`, entry multiplier, vol multiplier, realized vol, and reason so maker-to-IOC fallback keeps entry-fixed sizing.
+- Logs/state include raw size, rounded size, fillability, and min-lot notional because `--capital 10 --leverage 1` remains below Bitget `0.01 ETH` lot near ETH `1500-1600`, and vol down-sizing can only worsen fillability.
+- Rollback: restart without `--vol-target-sizing` or revert the live sizing change. No config/checkpoint rollback is needed.
+
+Validation run:
+
+- `uv run pytest tests/test_live_vol_target_position_sizing.py tests/test_live_common.py tests/test_live_entry_imports.py`
+- `uv run ruff check dex/live/position_sizing.py live_bitget_quant.py tests/test_live_vol_target_position_sizing.py`
+
 ## Latest Live Runtime Fix
 
 On 2026-06-27, Bitget live logs were reviewed for a short-to-long signal transition. The signal/gate path was normal, but two runtime bookkeeping issues were fixed:
@@ -323,9 +343,18 @@ Key read:
 - Cross-asset core Donchian sanity Stage 0 passed for BTC and SOL in `exp_0137`; next work may design the full cross-asset diagnostic, but no live/demo or symbol-universe change is authorized.
 - ETH/BTC overlap diagnostic rejected BTC core Donchian as a shadow sleeve in `exp_0137b`; low daily correlation (`0.25`) was outweighed by synchronized drawdown and high top-winner overlap.
 - First position-sizing branch is rejected in `exp_0138`; constant under-sizing is mostly linear damage control, reclaim-add recovers OOS by restoring near-baseline DD, and the wide DD throttle does not provide enough nonlinear value over the constant controls.
-- First risk-based sizing promotion gate is rejected in `exp_0139`; V1 vol targeting is the current only empirically effective position-stability observe scheme, not a live/shadow candidate because DD remains `-44.12%`. V2 ATR risk parity is skipped by Stage 0.
-- `exp_0140` confirms V1 vol targeting is clean and rolling12-positive. Residual max DD occurs in a low-volatility window with high active size, so the audit does not authorize a one-shot refinement or any live/shadow sizing.
+- First risk-based sizing promotion gate is rejected in `exp_0139`; V1 vol targeting is the current only empirically effective position-stability scheme and is now available as an explicit Bitget live opt-in via `--vol-target-sizing`. V2 ATR risk parity is skipped by Stage 0.
+- `exp_0140` confirms V1 vol targeting is clean and rolling12-positive. Residual max DD occurs in a low-volatility window with high active size, so the audit does not authorize a one-shot refinement, clip/window tuning, or default config/checkpoint promotion.
 - `exp_0141` rejects ER single-variable low-bucket sizing. Low ER Q1 is mixed high-variance across ER20/50/100 and carries both top winners and worst losers, so no ER Stage 1 sizing is authorized.
+
+## Modified Files In Latest Live Vol-Target Sizing
+
+- `dex/live/position_sizing.py`
+- `live_bitget_quant.py`
+- `tests/test_live_vol_target_position_sizing.py`
+- `docs/codex/CURRENT_STATE.md`
+- `docs/codex/DECISIONS.md`
+- `docs/codex/HANDOFF.md`
 
 ## Modified Files In Latest ER Diagnostic
 
