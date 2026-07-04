@@ -6,14 +6,28 @@ the right state instead of reopening old branches.
 This file is an index only. It does not promote candidates, change checkpoints,
 change oracle logic, or authorize live/demo routing.
 
+## 2026-06-24 Current Baseline Update
+
+Current ETH baseline is now `channel_breakout_v2_2_m375_bbm375_1p5` plus the
+TimesFM quantile gate:
+
+- checkpoint: `checkpoints/channel_breakout_v2_2_m375_bbm375_1p5.json`
+- live/demo gate config: `configs/live/timesfm_gate_exp_0068.json`
+- research candidate: `research_workspace/llm_candidates/exp_0068.json`
+- gate params: `context=1024`, `horizon=72`, `min_edge_pct=-0.01`,
+  `risk_floor_pct=0.05`
+
+The older 2026-06-17 direction below is historical unless it conflicts with
+this update.
+
 ## Read Order
 
 Read these first, in order:
 
 1. `research_workspace/research_state_handoff_v0.md`
    - Short current-state entry page.
-   - Current framing: v2 naked `375/432` is the signal core; next work is
-     sizing/drawdown control, not entry filtering.
+   - Current framing: v2.2 M375/BBM375/1.5 is the signal core, with TimesFM
+     gate as the current entry/reversal filter.
 
 2. `docs/current/codex_handoff_2026-06-16_filter_family_closure.md`
    - Main current handoff.
@@ -40,12 +54,13 @@ Use these as the current north star:
 
 Current active conclusion:
 
-- v2 naked `375/432` is the main signal core candidate.
-- v2.2 is observation-only for now.
-- v2.1 balanced is temporarily downgraded.
-- The main problem is thick-tail drawdown under old sizing, not lack of edge.
-- Next work should start with fixed sizing around `0.425x` to `0.45x`,
-  then drawdown-control sizing.
+- `channel_breakout_v2_2_m375_bbm375_1p5` is the current signal core.
+- TimesFM gate `exp_0068` is the current filter layer.
+- Live/demo should reference `configs/live/timesfm_gate_exp_0068.json`, not
+  `research_workspace/llm_candidates/`.
+- v2.1 balanced remains historical oracle context, not the current operating
+  baseline.
+- ETH only remains the recommended deployment universe.
 
 ## Baseline And Strategy Context
 
@@ -63,6 +78,10 @@ These explain where the strategy came from and what the frozen baseline means:
 Do not infer that v2.1 remains the best signal core just because it is the
 frozen baseline. The 2026-06-17 Monte Carlo notes supersede that as research
 direction.
+
+As of 2026-06-24, also do not infer that naked v2 `375/432` remains the
+operating baseline; the current operating baseline is v2.2 M375/BBM375/1.5 plus
+TimesFM gate.
 
 ## Current Research Operations
 
@@ -111,9 +130,11 @@ checking the handoff first.
 | `docs/superpowers/specs/*.md` | implementation history | Plans/specs, not current strategy direction |
 | `docs/superpowers/plans/*.md` | implementation history | Plans, not current strategy direction |
 
-## v2.2 / Exit Overlay Research
+## Historical v2.2 / Exit Overlay Research
 
-Keep these for evidence, but do not treat v2.2 as current best:
+Keep these for evidence. This section refers to older v2.2/exit-overlay
+branches such as `mtg_bcd`, not the current
+`channel_breakout_v2_2_m375_bbm375_1p5` + TimesFM baseline:
 
 | File | Status | Use |
 |------|--------|-----|

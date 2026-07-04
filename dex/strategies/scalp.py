@@ -1,9 +1,9 @@
 """
-High-frequency scalp strategy. Pure mean-reversion, no trend alignment required.
+Lower-frequency scalp strategy with trend-aligned mean reversion.
 
 Entry when price deviates from local mean; exit on reversion, fixed take-profit,
-fixed stop-loss, or timeout. Targets 50-200 trades per 30 days with small
-per-trade profit (0.3-0.8%).
+fixed stop-loss, or timeout. Defaults are deliberately wider than the original
+high-frequency version so default exchange costs do not dominate every trade.
 """
 
 import numpy as np
@@ -14,10 +14,10 @@ from dex.strategies.base import BaseStrategy
 
 
 class ScalpStrategy(BaseStrategy):
-    """High-frequency mean-reversion scalping strategy.
+    """Lower-frequency mean-reversion scalping strategy.
 
-    Uses tight Bollinger Bands for mean-reversion entries with optional
-    RSI, volume, trend-alignment, and session filters. Exits via fixed
+    Uses wider Bollinger Bands for mean-reversion entries with optional
+    volume and session filters. Exits via fixed
     take-profit, stop-loss, or timeout.
 
     Attributes:
@@ -43,20 +43,21 @@ class ScalpStrategy(BaseStrategy):
 
     def __init__(
         self,
-        window=10,
-        std_dev=1.2,
-        take_profit_pct=0.005,
-        stop_loss_pct=0.003,
-        max_hold_bars=6,
+        # ponytail: coarse ETH-cost defaults; run a param search before promotion.
+        window=144,
+        std_dev=2.5,
+        take_profit_pct=0.025,
+        stop_loss_pct=0.015,
+        max_hold_bars=144,
         use_volume_filter=False,
         volume_threshold=0.8,
-        rsi_entry_low=30,
-        rsi_entry_high=70,
+        rsi_entry_low=25,
+        rsi_entry_high=75,
         rsi_extreme_low=20,
         rsi_extreme_high=80,
-        use_rsi_entry=False,
-        use_trend_align=False,
-        trend_ma_period=50,
+        use_rsi_entry=True,
+        use_trend_align=True,
+        trend_ma_period=288,
         use_session_filter=False,
         session_start=13,
         session_end=21,
@@ -85,7 +86,7 @@ class ScalpStrategy(BaseStrategy):
         """
         Generate trading signals. 0=close, 1=hold, 2=long, 3=short.
 
-        Entry: price hits tight Bollinger Bands (pure mean-reversion).
+        Entry: price hits wide Bollinger Bands with RSI and trend confirmation.
         Exit: mean-reversion / fixed take-profit / fixed stop-loss / timeout.
         """
         close = df["close"].values.astype(float)

@@ -53,6 +53,7 @@ uv.lock
 run.log
 *.log
 .pytest_tmp/
+/research_workspace/diagnostics/.kronos_vendor_exp0205a/
 
 # Data artifacts in docs
 docs/*.csv

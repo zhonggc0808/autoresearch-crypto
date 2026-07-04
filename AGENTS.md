@@ -4,6 +4,10 @@ This file is the hard-rule entry point for Codex, Reasonix, and other coding age
 
 Project reference, current state, decisions, experiment records, live safeguards, and handoff notes live under `docs/codex/`.
 
+## Local External Paths
+
+- Obsidian vault: `D:\obsidianrepo\zgc的知识库`
+
 ## Project Hard Rules
 
 - Treat this repository as a crypto strategy research and live-trading codebase. Live-safety rules take priority over convenience.

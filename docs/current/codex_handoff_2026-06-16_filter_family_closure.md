@@ -110,6 +110,19 @@
 
 ---
 
+## 2026-06-24 Supersession Note
+
+Current ETH operating baseline is now `channel_breakout_v2_2_m375_bbm375_1p5`
+plus TimesFM gate `exp_0068`.
+
+- checkpoint: `checkpoints/channel_breakout_v2_2_m375_bbm375_1p5.json`
+- live/demo gate config: `configs/live/timesfm_gate_exp_0068.json`
+- gate params: `context=1024`, `horizon=72`, `min_edge_pct=-0.01`,
+  `risk_floor_pct=0.05`
+
+The older “entry filters closed / v2.2 observation-only” conclusion below is
+historical where it conflicts with this baseline.
+
 ## 4. 下一步方向
 
 明确转向：**不再做 entry-block filter。下一类方向应该先定义 contract，再手动校准/测试，不走 LLM 自动发散。**
